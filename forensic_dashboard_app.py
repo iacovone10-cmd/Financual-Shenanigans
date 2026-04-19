@@ -931,6 +931,15 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     sga = pick_series(fin, ["Selling General And Administration", "Selling And Marketing Expense", "Selling General Administrative"])
     cl = pick_series(bs, ["Current Liabilities"])
     ltd = pick_series(bs, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"])
+    other_income = pick_series(fin, ["Other Income Expense", "Other Non Operating Income Expenses", "Total Other Finance Cost"])
+    non_operating_income = pick_series(fin, ["Non Operating Income Expenses", "Total Unusual Items Excluding Goodwill"])
+    non_recurring_income = pick_series(fin, ["Special Income Charges", "Other Special Charges"])
+    asset_sale_gain = pick_series(fin, ["Gain On Sale Of Business", "Gain On Sale Of Security", "Gain Loss On Sale Of Assets"])
+    equity_investment_gain = pick_series(fin, ["Earnings From Equity Interest", "Gain Loss On Investment Securities"])
+    fair_value_gain = pick_series(fin, ["Unrealized Gain Loss", "Gain Loss On Fair Value Adjustments"])
+    tax_benefit = pick_series(fin, ["Tax Effect Of Unusual Items", "Deferred Tax", "Provision For Doubtful Accounts"])
+    one_time_gain = pick_series(fin, ["Gain On Sale Of Ppe", "Extraordinary Items"])
+    litigation_settlement_gain = pick_series(fin, ["Litigation Expense"])
     if rev is None or ni is None or cfo is None:
         return [], {}, [], {}, []
 
@@ -938,6 +947,15 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
         "revenue": rev, "net_income": ni, "cfo": cfo, "capex": capex, "acquisitions": acquisitions,
         "ar": ar, "inventory": inv, "payables": payables, "current_assets": ca, "ppe": ppe,
         "total_assets": ta, "dep": dep, "sga": sga, "current_liabilities": cl, "long_term_debt": ltd,
+        "other_income": other_income,
+        "non_operating_income": non_operating_income,
+        "non_recurring_income": non_recurring_income,
+        "asset_sale_gain": asset_sale_gain,
+        "equity_investment_gain": equity_investment_gain,
+        "fair_value_gain": fair_value_gain,
+        "tax_benefit": tax_benefit,
+        "one_time_gain": one_time_gain,
+        "litigation_settlement_gain": litigation_settlement_gain,
     }).dropna(how="all")
     if df.empty:
         return [], {}, [], {}, []
@@ -984,6 +1002,15 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
             "dsri": safe_float(row.get("dsri")),
             "beneish_m": safe_float(row.get("beneish_m")),
             "tata": safe_float(row.get("tata")),
+            "other_income": safe_float(row.get("other_income")),
+            "non_operating_income": safe_float(row.get("non_operating_income")),
+            "non_recurring_income": safe_float(row.get("non_recurring_income")),
+            "asset_sale_gain": safe_float(row.get("asset_sale_gain")),
+            "equity_investment_gain": safe_float(row.get("equity_investment_gain")),
+            "fair_value_gain": safe_float(row.get("fair_value_gain")),
+            "tax_benefit": safe_float(row.get("tax_benefit")),
+            "one_time_gain": safe_float(row.get("one_time_gain")),
+            "litigation_settlement_gain": safe_float(row.get("litigation_settlement_gain")),
         })
         cash_rows.append({
             "period": period,
@@ -1115,6 +1142,103 @@ def _ratio_change(curr_num: float | None, curr_den: float | None, prev_num: floa
     return (curr_num_v / curr_den_v) - (prev_num_v / prev_den_v)
 
 
+def classify_persistence(hit_count: int) -> str:
+    """
+    Classify signal persistence for explainability.
+    One-off = 1 period, repeated = 2 periods, persistent = 3+ periods.
+    """
+    if hit_count >= 3:
+        return "persistent"
+    if hit_count == 2:
+        return "repeated"
+    if hit_count == 1:
+        return "one-off"
+    return "none"
+
+
+def detect_non_operating_support(quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Detect earnings support from non-core/non-recurring sources.
+    This is intentionally rules-based (no black-box model) so each score effect is auditable.
+    """
+    result: dict[str, Any] = {
+        "penalty": 0,
+        "signal_count": 0,
+        "signals": [],
+        "latest_support_ratio": None,
+        "persistence": "none",
+    }
+    if not quality_rows:
+        return result
+
+    latest = quality_rows[-1]
+    ni = safe_float(latest.get("net_income"))
+    cfo = safe_float(latest.get("cfo"))
+    if ni in (None, 0):
+        return result
+
+    support_items = [
+        ("non_operating_income", "non-operating income"),
+        ("non_recurring_income", "non-recurring income"),
+        ("asset_sale_gain", "asset sale gain"),
+        ("one_time_gain", "one-time gain"),
+        ("equity_investment_gain", "equity investment gain"),
+        ("fair_value_gain", "fair value gain"),
+        ("litigation_settlement_gain", "litigation settlement gain"),
+        ("tax_benefit", "tax benefit"),
+        ("other_income", "other income"),
+    ]
+
+    latest_support_total = 0.0
+    yearly_support_hits = 0
+    for row in quality_rows[-5:]:
+        row_total = 0.0
+        for key, _ in support_items:
+            val = safe_float(row.get(key))
+            if val is not None and val > 0:
+                row_total += val
+        if row_total > 0:
+            yearly_support_hits += 1
+        if row is latest:
+            latest_support_total = row_total
+
+    support_ratio = abs(latest_support_total) / abs(ni) if ni not in (None, 0) else None
+    result["latest_support_ratio"] = support_ratio
+    result["persistence"] = classify_persistence(yearly_support_hits)
+
+    for key, label in support_items:
+        val = safe_float(latest.get(key))
+        if val is None or val <= 0:
+            continue
+        contribution = abs(val) / abs(ni) if ni not in (None, 0) else 0.0
+        if contribution >= 0.1:
+            result["signals"].append({
+                "signal": label,
+                "value": val,
+                "ratio_to_net_income": contribution,
+            })
+
+    # Severity increases if earnings look strong while operating cash support is weak.
+    cfo_support_mismatch = cfo is not None and cfo < ni * 0.8
+    if support_ratio is not None:
+        if support_ratio >= 0.35:
+            result["penalty"] += 12
+        elif support_ratio >= 0.2:
+            result["penalty"] += 7
+        elif support_ratio >= 0.1:
+            result["penalty"] += 4
+    if cfo_support_mismatch and (support_ratio or 0) >= 0.1:
+        result["penalty"] += 5
+
+    if result["persistence"] == "persistent":
+        result["penalty"] += 5
+    elif result["persistence"] == "repeated":
+        result["penalty"] += 2
+
+    result["signal_count"] = len(result["signals"])
+    return result
+
+
 def build_forensic_components(
     quality_rows: list[dict[str, Any]],
     text_signals: list[dict[str, Any]] | None = None,
@@ -1131,6 +1255,9 @@ def build_forensic_components(
         "reason_tags": [],
         "major_reasons": [],
         "persistent_events": 0,
+        "mismatch_classification": "none",
+        "working_capital_anomalies": [],
+        "non_operating_analysis": {},
     }
     if len(quality_rows) < 2:
         return comps
@@ -1164,6 +1291,8 @@ def build_forensic_components(
             mismatch_years += 1
             if row is quality_rows[-1]:
                 mismatch_last = True
+    mismatch_class = classify_persistence(mismatch_years)
+    comps["mismatch_classification"] = mismatch_class
     if mismatch_years >= 3:
         comps["penalties"] += 14
         comps["persistence_penalty"] += 7
@@ -1185,6 +1314,7 @@ def build_forensic_components(
         ("payables_growth", "payables"),
     ]
     wc_shocks = 0
+    wc_anomalies: list[dict[str, Any]] = []
     for key, label in wc_metrics:
         vals = [safe_float(r.get(key)) for r in quality_rows[-6:]]
         clean = [v for v in vals if v is not None]
@@ -1202,14 +1332,36 @@ def build_forensic_components(
             comps["penalties"] += 5
             comps["reason_tags"].append(f"{label} shock")
             comps["major_reasons"].append(f"Unusual {label} move is pressuring cash conversion")
+            wc_anomalies.append({
+                "metric": label,
+                "latest_change": latest,
+                "baseline_mean": safe_float(mean),
+                "shock_threshold": safe_float(shock_threshold),
+                "why_it_matters": (
+                    "Higher receivables can signal weaker collections or aggressive recognition." if label == "receivables"
+                    else "Inventory spikes can indicate demand softness or inventory overbuild." if label == "inventory"
+                    else "Payables contraction can consume cash and weaken liquidity buffer."
+                ),
+            })
     if wc_shocks >= 2:
         comps["persistence_penalty"] += 3
         comps["persistent_events"] += 1
+    comps["working_capital_anomalies"] = wc_anomalies
 
     # 4) Persistence scaling: repeated anomalies should weigh more than isolated anomalies.
     if rev_margin_divergence and mismatch_years >= 2:
         comps["persistence_penalty"] += 4
         comps["persistent_events"] += 1
+
+    # 4b) Explicit non-operating/non-recurring earnings support analysis.
+    non_op = detect_non_operating_support(quality_rows)
+    comps["non_operating_analysis"] = non_op
+    if non_op.get("penalty", 0) > 0:
+        comps["penalties"] += non_op["penalty"]
+        if non_op.get("persistence") in {"repeated", "persistent"}:
+            comps["persistent_events"] += 1
+        comps["reason_tags"].append("non-operating earnings support")
+        comps["major_reasons"].append("Reported earnings appear supported by non-core or non-recurring items")
 
     # 5) Text + numeric alignment boost (when both point to same direction).
     text_hits = {str(s.get("signal", "")).lower() for s in (text_signals or [])}
@@ -1220,6 +1372,8 @@ def build_forensic_components(
         alignment += 4
     if wc_shocks > 0 and ({"restructure", "restructuring", "litigation"} & text_hits):
         alignment += 2
+    if non_op.get("penalty", 0) > 0 and ({"one-time", "one time", "fair value", "gain on sale", "tax benefit", "other income"} & text_hits):
+        alignment += 4
     comps["text_alignment_boost"] = alignment
     comps["penalties"] += alignment
 
@@ -1305,6 +1459,36 @@ def generate_flags(
             "title": "Working-capital shock",
             "detail": "Receivables/inventory/payables moved unusually versus history, which can absorb cash and pressure future margins.",
         })
+    for anomaly in components.get("working_capital_anomalies", [])[:2]:
+        metric = str(anomaly.get("metric", "working capital")).title()
+        latest_change = safe_float(anomaly.get("latest_change"))
+        detail = anomaly.get("why_it_matters", "Working-capital volatility can weaken cash quality.")
+        flags.append({
+            "severity": "Warn",
+            "title": f"{metric} anomaly",
+            "detail": f"Latest change is {fmt_value(latest_change)}. {detail}",
+        })
+    non_op = components.get("non_operating_analysis", {}) or {}
+    if non_op.get("penalty", 0) > 0:
+        support_ratio = safe_float(non_op.get("latest_support_ratio"))
+        persistence = str(non_op.get("persistence", "none"))
+        severity = "Bad" if (support_ratio or 0) >= 0.2 or persistence == "persistent" else "Warn"
+        ratio_txt = f"{support_ratio:.2f}" if support_ratio is not None else "n/a"
+        flags.append({
+            "severity": severity,
+            "title": "Non-operating / non-recurring earnings support",
+            "detail": (
+                f"Estimated non-core support is {ratio_txt}x net income with {persistence} pattern. "
+                "Strong reported earnings may be less sustainable when support is non-operating."
+            ),
+        })
+        if non_op.get("signal_count", 0):
+            signal_labels = [str(s.get("signal")) for s in non_op.get("signals", [])[:3]]
+            flags.append({
+                "severity": "Warn",
+                "title": "Potential one-time gain contributors",
+                "detail": "Detected contributors: " + ", ".join(signal_labels) + ". These can reduce repeatability of earnings quality.",
+            })
     if components.get("text_alignment_boost", 0) >= 3:
         flags.append({
             "severity": "Warn",
@@ -1396,6 +1580,16 @@ def analyze_filing_text(text: str) -> tuple[list[dict[str, Any]], list[dict[str,
         "allowance": ("Warn", "Allowance language can matter for reserve adequacy."),
         "channel": ("Warn", "Channel references may matter for sell-in vs sell-through quality."),
         "litigation": ("Warn", "Legal exposure may affect earnings quality and reserves."),
+        "non-operating": ("Warn", "Non-operating earnings support can be less sustainable."),
+        "non recurring": ("Warn", "Non-recurring items may inflate current-period earnings."),
+        "non-recurring": ("Warn", "Non-recurring items may inflate current-period earnings."),
+        "gain on sale": ("Warn", "Gain on sale can boost earnings without core operating improvement."),
+        "asset sale": ("Warn", "Asset sale gains are often non-repeatable earnings support."),
+        "fair value": ("Warn", "Fair value gains can be volatile and less cash-backed."),
+        "equity method": ("Warn", "Equity investment gains may not reflect core operating momentum."),
+        "tax benefit": ("Warn", "Tax benefit can materially inflate reported net income."),
+        "settlement gain": ("Warn", "Settlement gains are often one-time and non-operating."),
+        "other income": ("Warn", "Other income increases may warrant reconciliation to core earnings."),
     }
     lower, signals, excerpts = text.lower(), [], []
     for key, (severity, interpretation) in keyword_map.items():
@@ -1521,13 +1715,20 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                 reasons.append("AR pressure")
             if safe_float(acq_metrics.get("acq_to_cfo")) is not None and safe_float(acq_metrics.get("acq_to_cfo")) > 0.5:
                 reasons.append("acquisition heavy")
+            if (components.get("non_operating_analysis", {}) or {}).get("penalty", 0) > 0:
+                reasons.append("non-operating support")
+            if components.get("mismatch_classification") == "persistent":
+                reasons.append("persistent NI/CFO divergence")
             reasons.extend(components.get("reason_tags", [])[:3])
+            reasons.extend(components.get("major_reasons", [])[:2])
             if reasons:
                 distress_rank = (
                     (100.0 - score)
                     + min(len(cashflow_flags) * 3, 12)
                     + min(sum(_severity_to_points(f["severity"]) for f in flags), 12)
+                    + min(safe_float(components.get("penalties")) or 0.0, 15.0)
                     + min(safe_float(components.get("persistence_penalty")) or 0.0, 10.0)
+                    + min((safe_float(components.get("persistent_events")) or 0.0) * 3.0, 9.0)
                     + min(safe_float(components.get("text_alignment_boost")) or 0.0, 6.0)
                 )
                 rows.append({
@@ -1668,10 +1869,12 @@ def analyze() -> Any:
             "new_signals_added": [
                 "Revenue growth vs net-margin deterioration",
                 "Revenue growth vs CFO-margin deterioration",
-                "Persistent net income vs CFO divergence",
+                "NI vs CFO mismatch classified as one-off/repeated/persistent",
                 "Working-capital shock detection (AR/inventory/payables)",
                 "Persistence weighting across multi-year anomalies",
                 "Text and numeric anomaly alignment weighting",
+                "Non-operating and non-recurring earnings support detection",
+                "Gain-on-sale / fair-value / tax-benefit support checks",
             ],
             "peers": peers,
             "watchlist": watchlist,
