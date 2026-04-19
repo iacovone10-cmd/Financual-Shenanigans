@@ -1101,13 +1101,155 @@ def build_trend_signals(cfo_ni_trend: dict[str, list[Any]], dsri_fcf_trend: dict
     }
 
 
-def generate_flags(quality_rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], str, float | None, float | None]:
+def _severity_to_points(severity: str) -> int:
+    return 2 if severity == "Bad" else 1 if severity == "Warn" else 0
+
+
+def _ratio_change(curr_num: float | None, curr_den: float | None, prev_num: float | None, prev_den: float | None) -> float | None:
+    curr_num_v = safe_float(curr_num)
+    curr_den_v = safe_float(curr_den)
+    prev_num_v = safe_float(prev_num)
+    prev_den_v = safe_float(prev_den)
+    if curr_num_v is None or curr_den_v in (None, 0) or prev_num_v is None or prev_den_v in (None, 0):
+        return None
+    return (curr_num_v / curr_den_v) - (prev_num_v / prev_den_v)
+
+
+def build_forensic_components(
+    quality_rows: list[dict[str, Any]],
+    text_signals: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Build explainable forensic components used by flags and scoring.
+    Every component explicitly maps a business signal (cash/revenue quality, persistence,
+    and working-capital stress) to a score effect so the UI remains interpretable.
+    """
+    comps: dict[str, Any] = {
+        "penalties": 0,
+        "persistence_penalty": 0,
+        "text_alignment_boost": 0,
+        "reason_tags": [],
+        "major_reasons": [],
+        "persistent_events": 0,
+    }
+    if len(quality_rows) < 2:
+        return comps
+
+    last = quality_rows[-1]
+    prev = quality_rows[-2]
+
+    # 1) Revenue growth versus margin quality divergence.
+    rev_growth = safe_float(last.get("revenue_growth"))
+    net_margin_delta = _ratio_change(last.get("net_income"), last.get("revenue"), prev.get("net_income"), prev.get("revenue"))
+    cfo_margin_delta = _ratio_change(last.get("cfo"), last.get("revenue"), prev.get("cfo"), prev.get("revenue"))
+    rev_margin_divergence = False
+    if rev_growth is not None and rev_growth > 0.08:
+        if (net_margin_delta is not None and net_margin_delta < -0.015) or (cfo_margin_delta is not None and cfo_margin_delta < -0.015):
+            rev_margin_divergence = True
+            comps["penalties"] += 9
+            comps["reason_tags"].append("margin divergence")
+            comps["major_reasons"].append("Revenue growth is outpacing margin quality")
+
+    # 2) Earnings versus CFO mismatch persistence (one-off vs repeated).
+    mismatch_years = 0
+    mismatch_last = False
+    for row in quality_rows[-5:]:
+        ni = safe_float(row.get("net_income"))
+        cfo = safe_float(row.get("cfo"))
+        cfo_ni = safe_float(row.get("cfo_ni"))
+        if ni in (None, 0) or cfo is None:
+            continue
+        mismatch = (abs(ni - cfo) / abs(ni) > 0.30) or (cfo_ni is not None and cfo_ni < 0.9)
+        if mismatch:
+            mismatch_years += 1
+            if row is quality_rows[-1]:
+                mismatch_last = True
+    if mismatch_years >= 3:
+        comps["penalties"] += 14
+        comps["persistence_penalty"] += 7
+        comps["persistent_events"] += 1
+        comps["reason_tags"].append("persistent earnings/cash mismatch")
+        comps["major_reasons"].append("Earnings and operating cash flow diverge across multiple years")
+    elif mismatch_years == 2:
+        comps["penalties"] += 8
+        comps["persistence_penalty"] += 3
+        comps["reason_tags"].append("repeated earnings/cash mismatch")
+    elif mismatch_last:
+        comps["penalties"] += 4
+        comps["reason_tags"].append("one-off earnings/cash mismatch")
+
+    # 3) Working-capital shock detection using own-history baseline.
+    wc_metrics = [
+        ("ar_growth", "receivables"),
+        ("inventory_growth", "inventory"),
+        ("payables_growth", "payables"),
+    ]
+    wc_shocks = 0
+    for key, label in wc_metrics:
+        vals = [safe_float(r.get(key)) for r in quality_rows[-6:]]
+        clean = [v for v in vals if v is not None]
+        if len(clean) < 3:
+            continue
+        latest = clean[-1]
+        baseline = clean[:-1]
+        mean = pd.Series(baseline).mean()
+        std = pd.Series(baseline).std(ddof=0) or 0.0
+        shock_threshold = abs(mean) + max(0.20, 1.5 * std)
+        is_shock = abs(latest) > shock_threshold
+        deterioration = (label in {"receivables", "inventory"} and latest > 0) or (label == "payables" and latest < 0)
+        if is_shock and deterioration:
+            wc_shocks += 1
+            comps["penalties"] += 5
+            comps["reason_tags"].append(f"{label} shock")
+            comps["major_reasons"].append(f"Unusual {label} move is pressuring cash conversion")
+    if wc_shocks >= 2:
+        comps["persistence_penalty"] += 3
+        comps["persistent_events"] += 1
+
+    # 4) Persistence scaling: repeated anomalies should weigh more than isolated anomalies.
+    if rev_margin_divergence and mismatch_years >= 2:
+        comps["persistence_penalty"] += 4
+        comps["persistent_events"] += 1
+
+    # 5) Text + numeric alignment boost (when both point to same direction).
+    text_hits = {str(s.get("signal", "")).lower() for s in (text_signals or [])}
+    alignment = 0
+    if rev_margin_divergence and ({"allowance", "channel", "one-time", "one time"} & text_hits):
+        alignment += 3
+    if mismatch_years >= 2 and ({"material weakness", "restatement", "temporary"} & text_hits):
+        alignment += 4
+    if wc_shocks > 0 and ({"restructure", "restructuring", "litigation"} & text_hits):
+        alignment += 2
+    comps["text_alignment_boost"] = alignment
+    comps["penalties"] += alignment
+
+    # Keep concise reason text for screener and preserve deterministic ordering.
+    unique_major = []
+    for reason in comps["major_reasons"]:
+        if reason not in unique_major:
+            unique_major.append(reason)
+    comps["major_reasons"] = unique_major[:4]
+    comps["reason_tags"] = list(dict.fromkeys(comps["reason_tags"]))[:6]
+    return comps
+
+
+def generate_flags(
+    quality_rows: list[dict[str, Any]],
+    text_signals: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, str]], str, float | None, float | None, dict[str, Any]]:
     if not quality_rows:
-        return ([{"severity": "Warn", "title": "Limited fundamentals", "detail": "Available structured data is incomplete. Manual filing review becomes more important."}], "Medium", None, None)
+        return (
+            [{"severity": "Warn", "title": "Limited fundamentals", "detail": "Available structured data is incomplete. Manual filing review becomes more important."}],
+            "Medium",
+            None,
+            None,
+            {"penalties": 0, "persistence_penalty": 0, "text_alignment_boost": 0, "reason_tags": [], "major_reasons": [], "persistent_events": 0},
+        )
     flags: list[dict[str, str]] = []
     last = quality_rows[-1]
     latest_cfo_ni = last.get("cfo_ni")
     beneish = last.get("beneish_m")
+    components = build_forensic_components(quality_rows, text_signals=text_signals)
     if latest_cfo_ni is not None:
         if latest_cfo_ni < 0.8:
             flags.append({"severity": "Bad", "title": "Weak cash conversion", "detail": f"Latest CFO/NI is {latest_cfo_ni:.2f}. Earnings are not converting well into cash."})
@@ -1132,9 +1274,48 @@ def generate_flags(quality_rows: list[dict[str, Any]]) -> tuple[list[dict[str, s
         flags.append({"severity": "Bad", "title": "Beneish M-Score elevated", "detail": f"Latest Beneish M is {beneish:.2f}. This is a classic manipulation warning threshold."})
     elif beneish is not None and beneish > -2.20:
         flags.append({"severity": "Warn", "title": "Beneish M-Score watch zone", "detail": f"Latest Beneish M is {beneish:.2f}. Not decisive, but worth deeper reading."})
-    score = sum(2 if f["severity"] == "Bad" else 1 if f["severity"] == "Warn" else 0 for f in flags)
+
+    if "margin divergence" in components.get("reason_tags", []):
+        flags.append({
+            "severity": "Warn",
+            "title": "Revenue quality divergence",
+            "detail": "Revenue is growing while net or CFO margin is deteriorating. Growth quality may be weakening.",
+        })
+    if "persistent earnings/cash mismatch" in components.get("reason_tags", []):
+        flags.append({
+            "severity": "Bad",
+            "title": "Persistent earnings vs cash mismatch",
+            "detail": "Net income and operating cash flow diverge across multiple periods, which raises earnings quality risk.",
+        })
+    elif "repeated earnings/cash mismatch" in components.get("reason_tags", []):
+        flags.append({
+            "severity": "Warn",
+            "title": "Repeated earnings vs cash mismatch",
+            "detail": "The NI vs CFO gap appears in multiple years, suggesting more than one-off timing noise.",
+        })
+    elif "one-off earnings/cash mismatch" in components.get("reason_tags", []):
+        flags.append({
+            "severity": "Warn",
+            "title": "One-off earnings vs cash mismatch",
+            "detail": "Current-period NI and CFO diverge, but persistence is limited so far.",
+        })
+    if any(tag.endswith("shock") for tag in components.get("reason_tags", [])):
+        flags.append({
+            "severity": "Warn",
+            "title": "Working-capital shock",
+            "detail": "Receivables/inventory/payables moved unusually versus history, which can absorb cash and pressure future margins.",
+        })
+    if components.get("text_alignment_boost", 0) >= 3:
+        flags.append({
+            "severity": "Warn",
+            "title": "Text and numeric risk alignment",
+            "detail": "Filing language warning signals align with the financial anomalies, increasing confidence in the red flags.",
+        })
+
+    score = sum(_severity_to_points(f["severity"]) for f in flags)
+    score += min(components.get("persistent_events", 0), 3)
     risk = "High" if score >= 5 else "Medium" if score >= 2 else "Low"
-    return flags, risk, latest_cfo_ni, beneish
+    return flags, risk, latest_cfo_ni, beneish, components
 
 
 def build_cashflow_flags(cashflow_rows: list[dict[str, Any]], acq_metrics: dict[str, Any]) -> list[dict[str, str]]:
@@ -1240,7 +1421,17 @@ def build_reading_checklist() -> list[dict[str, str]]:
     ]
 
 
-def compute_forensic_score(cfo_ni: float | None, beneish: float | None, flag_count: int) -> tuple[float, str, str]:
+def compute_forensic_score(
+    cfo_ni: float | None,
+    beneish: float | None,
+    flag_count: int,
+    components: dict[str, Any] | None = None,
+    text_signals: list[dict[str, Any]] | None = None,
+) -> tuple[float, str, str]:
+    """
+    Explainable score where 100 is cleaner accounting quality.
+    Persistence penalties are additive but bounded, so temporary anomalies do not dominate.
+    """
     score = 100.0
     if cfo_ni is not None:
         if cfo_ni < 0.6:
@@ -1259,6 +1450,16 @@ def compute_forensic_score(cfo_ni: float | None, beneish: float | None, flag_cou
         elif beneish < -2.8:
             score += 5
     score -= min(flag_count * 6, 30)
+    if components:
+        score -= min(safe_float(components.get("penalties")) or 0.0, 25.0)
+        score -= min(safe_float(components.get("persistence_penalty")) or 0.0, 14.0)
+        # Reward if signals are internally consistent and clean.
+        if (safe_float(components.get("penalties")) or 0.0) <= 1 and (safe_float(components.get("persistent_events")) or 0.0) == 0:
+            score += 4
+    if text_signals:
+        severe_words = {"material weakness", "restatement"}
+        if any(str(s.get("signal", "")).lower() in severe_words for s in text_signals):
+            score -= 4
     score = max(0.0, min(100.0, score))
     if score >= 80:
         return score, "Monitor / Possible long candidate", "Low"
@@ -1267,15 +1468,22 @@ def compute_forensic_score(cfo_ni: float | None, beneish: float | None, flag_cou
     return score, "Avoid / High forensic attention", "High"
 
 
-def build_decision_table(latest_metrics: dict[str, Any], flags: list[dict[str, str]], risk: str, company_name: str = "") -> list[dict[str, str]]:
+def build_decision_table(
+    latest_metrics: dict[str, Any],
+    flags: list[dict[str, str]],
+    risk: str,
+    company_name: str = "",
+    components: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     cfo_ni = safe_float(latest_metrics.get("cfo_ni"))
     beneish = safe_float(latest_metrics.get("beneish_m"))
-    score, verdict, derived_risk = compute_forensic_score(cfo_ni, beneish, len(flags))
+    score, verdict, derived_risk = compute_forensic_score(cfo_ni, beneish, len(flags), components=components)
+    persistence_note = "Repeated anomaly clusters increase score impact." if (components or {}).get("persistent_events", 0) else "No strong multi-year persistence penalty."
     return [
         {"metric": "Forensic score", "value": f"{score:.1f}/100", "comment": "Higher is cleaner. This is a screening score, not proof."},
         {"metric": "Verdict", "value": verdict, "comment": "Use this only after checking Item 7, Item 8, and controls."},
         {"metric": "Risk alignment", "value": f"API risk: {risk} / Score risk: {derived_risk}", "comment": "If these disagree, read the filing more carefully."},
-        {"metric": "Main focus", "value": "Cash conversion, working capital, acquisitions", "comment": "Start with receivables, free cash flow, and roll-up intensity."},
+        {"metric": "Main focus", "value": "Cash conversion, working capital, acquisitions", "comment": f"Start with receivables, free cash flow, and roll-up intensity. {persistence_note}"},
     ]
 
 
@@ -1284,8 +1492,8 @@ def build_watchlist_snapshot() -> list[dict[str, Any]]:
     for ticker in DEFAULT_WATCHLIST:
         try:
             quality_rows, _, _, _, _ = build_quality_rows(ticker)
-            flags, risk, cfo_ni, beneish = generate_flags(quality_rows)
-            score, verdict, _ = compute_forensic_score(cfo_ni, beneish, len(flags))
+            flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
+            score, verdict, _ = compute_forensic_score(cfo_ni, beneish, len(flags), components=components)
             rows.append({"ticker": ticker, "score": score, "risk": risk, "verdict": verdict, "cfo_ni": cfo_ni, "beneish": beneish, "flag_count": len(flags)})
         except Exception:
             rows.append({"ticker": ticker, "score": 0.0, "risk": "NA", "verdict": "NA", "cfo_ni": None, "beneish": None, "flag_count": 0})
@@ -1300,9 +1508,9 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
     for ticker in choose_universe(mode):
         try:
             quality_rows, latest_metrics, cashflow_rows, acq_metrics, _ = build_quality_rows(ticker)
-            flags, risk, cfo_ni, beneish = generate_flags(quality_rows)
+            flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
-            score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags))
+            score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
             dsri = safe_float(latest_metrics.get("dsri"))
             reasons = []
             if cfo_ni is not None and cfo_ni < 0.9:
@@ -1313,7 +1521,15 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                 reasons.append("AR pressure")
             if safe_float(acq_metrics.get("acq_to_cfo")) is not None and safe_float(acq_metrics.get("acq_to_cfo")) > 0.5:
                 reasons.append("acquisition heavy")
+            reasons.extend(components.get("reason_tags", [])[:3])
             if reasons:
+                distress_rank = (
+                    (100.0 - score)
+                    + min(len(cashflow_flags) * 3, 12)
+                    + min(sum(_severity_to_points(f["severity"]) for f in flags), 12)
+                    + min(safe_float(components.get("persistence_penalty")) or 0.0, 10.0)
+                    + min(safe_float(components.get("text_alignment_boost")) or 0.0, 6.0)
+                )
                 rows.append({
                     "ticker": ticker,
                     "score": score,
@@ -1321,11 +1537,14 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "cfo_ni": cfo_ni,
                     "beneish": beneish,
                     "dsri": dsri,
-                    "reason": ", ".join(reasons[:3]),
+                    "reason": ", ".join(list(dict.fromkeys(reasons))[:3]),
+                    "distress_rank": distress_rank,
                 })
         except Exception:
             continue
-    rows.sort(key=lambda x: x["score"])
+    rows.sort(key=lambda x: (-x.get("distress_rank", 0), x.get("score", 100)))
+    for row in rows:
+        row.pop("distress_rank", None)
     return rows[:20]
 
 
@@ -1348,7 +1567,7 @@ def build_peer_snapshot(base_ticker: str) -> list[dict[str, Any]]:
                 continue
             price_info = get_price_chart_and_info(ticker, period="1y")
             quality_rows, _, _, _, _ = build_quality_rows(ticker)
-            flags, _, cfo_ni, beneish = generate_flags(quality_rows)
+            flags, _, cfo_ni, beneish, _ = generate_flags(quality_rows)
             peers.append({"ticker": ticker, "price": price_info.get("price"), "market_cap": price_info.get("market_cap"), "cfo_ni": cfo_ni, "beneish": beneish, "flag_count": len(flags)})
             if len(peers) >= 6:
                 break
@@ -1359,7 +1578,7 @@ def build_peer_snapshot(base_ticker: str) -> list[dict[str, Any]]:
             try:
                 price_info = get_price_chart_and_info(ticker, period="1y")
                 quality_rows, _, _, _, _ = build_quality_rows(ticker)
-                flags, _, cfo_ni, beneish = generate_flags(quality_rows)
+                flags, _, cfo_ni, beneish, _ = generate_flags(quality_rows)
                 peers.append({"ticker": ticker, "price": price_info.get("price"), "market_cap": price_info.get("market_cap"), "cfo_ni": cfo_ni, "beneish": beneish, "flag_count": len(flags)})
             except Exception:
                 continue
@@ -1383,7 +1602,6 @@ def analyze() -> Any:
     try:
         info = get_price_chart_and_info(ticker, period=period)
         quality_rows, latest_metrics, cashflow_rows, acq_metrics, working_capital_rows = build_quality_rows(ticker)
-        flags, risk, latest_cfo_ni, beneish = generate_flags(quality_rows)
         filings = get_sec_recent_filings(ticker)
         macro = get_macro_snapshot()
         news = get_news_google_rss(f"{ticker} stock OR global economy OR inflation OR interest rates", limit=8)
@@ -1391,6 +1609,7 @@ def analyze() -> Any:
         reading_checklist = build_reading_checklist()
         filing_text = fetch_latest_10k_text(ticker)
         text_signals, text_excerpts = analyze_filing_text(filing_text)
+        flags, risk, latest_cfo_ni, beneish, forensic_components = generate_flags(quality_rows, text_signals=text_signals)
         item7_excerpt = extract_section_excerpt(filing_text, "item 7", ["item 7a", "item 8"])
         item9a_excerpt = extract_section_excerpt(filing_text, "item 9a", ["item 9b", "item 10"])
         watchlist = build_watchlist_snapshot()
@@ -1398,7 +1617,14 @@ def analyze() -> Any:
         cfo_ni_trend = get_cfo_ni_trend_from_quality_rows(quality_rows)
         dsri_fcf_trend = get_dsri_fcf_trend(quality_rows, cashflow_rows)
         trend_signals = build_trend_signals(cfo_ni_trend, dsri_fcf_trend)
-        decision_table = build_decision_table(latest_metrics, flags, risk, info["long_name"])
+        decision_table = build_decision_table(latest_metrics, flags, risk, info["long_name"], components=forensic_components)
+        forensic_score, _, _ = compute_forensic_score(
+            latest_cfo_ni,
+            beneish,
+            len(flags),
+            components=forensic_components,
+            text_signals=text_signals,
+        )
         acquisition_table = [
             {"metric": "Latest acquisitions cash", "value": fmt_value(abs(acq_metrics.get("latest_acquisitions")) if safe_float(acq_metrics.get("latest_acquisitions")) is not None else None), "comment": "Cash outflow for acquisitions. Displayed as absolute size for readability."},
             {"metric": "Average acquisitions (4 periods)", "value": fmt_value(abs(acq_metrics.get("avg_acquisitions")) if safe_float(acq_metrics.get("avg_acquisitions")) is not None else None), "comment": "Useful to spot serial acquirers and roll-up patterns."},
@@ -1436,6 +1662,17 @@ def analyze() -> Any:
             "item7_excerpt": item7_excerpt,
             "item9a_excerpt": item9a_excerpt,
             "decision_table": decision_table,
+            "forensic_score": forensic_score,
+            "forensic_components": forensic_components,
+            "forensic_summary": "; ".join(forensic_components.get("major_reasons", [])[:3]) if forensic_components.get("major_reasons") else "No additional persistent forensic anomalies detected.",
+            "new_signals_added": [
+                "Revenue growth vs net-margin deterioration",
+                "Revenue growth vs CFO-margin deterioration",
+                "Persistent net income vs CFO divergence",
+                "Working-capital shock detection (AR/inventory/payables)",
+                "Persistence weighting across multi-year anomalies",
+                "Text and numeric anomaly alignment weighting",
+            ],
             "peers": peers,
             "watchlist": watchlist,
             "top_gainers": top_gainers,
