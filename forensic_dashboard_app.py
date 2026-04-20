@@ -215,6 +215,7 @@ APP_HTML = r"""<!doctype html>
       <button id="copyBtn" class="button">Copy notes</button>
       <button id="exportSavedBtn" class="button">Export saved CSV</button>
       <button id="exportWatchlistBtn" class="button">Export watchlist CSV</button>
+      <button id="macroBtn" class="button" onclick="window.open('/macro', '_blank')">Global macro dashboard</button>
     </div>
 
     <div class="panel" style="margin-bottom:18px; padding:16px 18px;">
@@ -725,6 +726,90 @@ APP_HTML = r"""<!doctype html>
   runAnalysis();
   loadSaved();
   loadScreener();
+</script>
+</body>
+</html>"""
+
+MACRO_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Global Macro Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root { --bg:#060b1a; --panel:#0f1a32; --border:rgba(255,255,255,.12); --text:#e7edff; --muted:#a3b2d8; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --neutral:#7dd3fc; }
+    body{ margin:0; background:linear-gradient(180deg,#060b1a,#0c1328); color:var(--text); font-family:Inter,Segoe UI,sans-serif;}
+    .container{ width:min(1600px,calc(100vw - 28px)); margin:auto; padding:18px 0 30px;}
+    .top{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px;}
+    .btn{ border:1px solid var(--border); border-radius:12px; color:var(--text); background:rgba(255,255,255,.06); padding:10px 14px; cursor:pointer; text-decoration:none;}
+    .grid{ display:grid; grid-template-columns:repeat(12,1fr); gap:12px;}
+    .card{ grid-column:span 12; border:1px solid var(--border); border-radius:18px; background:rgba(255,255,255,.05); padding:14px;}
+    .span-6{ grid-column:span 6;} .span-4{ grid-column:span 4;} .span-8{ grid-column:span 8;}
+    h1,h2{ margin:0 0 8px;} .muted{ color:var(--muted);}
+    .regimes{ display:grid; grid-template-columns: repeat(5,1fr); gap:8px;}
+    .pill{ padding:8px 10px; border-radius:999px; border:1px solid var(--border); display:inline-block; font-weight:700;}
+    .ok{ background:rgba(52,211,153,.14); color:var(--ok);} .warn{ background:rgba(251,191,36,.14); color:var(--warn);} .bad{ background:rgba(248,113,113,.14); color:var(--bad);} .neutral{ background:rgba(125,211,252,.14); color:var(--neutral);}
+    table{ width:100%; border-collapse:collapse; font-size:14px;} th,td{ padding:8px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top;} th{ color:var(--muted); font-size:12px; text-transform:uppercase;}
+    .tabs{ display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;} .tab{ padding:8px 12px; border-radius:999px; border:1px solid var(--border); cursor:pointer;}
+    .tab.active{ background:rgba(125,211,252,.18); color:#fff;}
+    .section{ display:none;} .section.active{ display:block;}
+    .notice{ margin-top:8px; color:var(--warn); font-size:13px;}
+    @media (max-width: 1200px){ .span-6,.span-4,.span-8{grid-column:span 12;} .regimes{grid-template-columns:1fr 1fr;} }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="top">
+    <h1>Global Macro Dashboard</h1>
+    <div>
+      <button class="btn" id="refreshBtn">Refresh</button>
+      <a class="btn" href="/">Forensic dashboard</a>
+    </div>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div class="grid">
+    <div class="card"><h2>How the world is doing</h2><div id="summaryText" class="muted">Loading...</div><div class="regimes" id="regimePanel"></div><div id="notices" class="notice"></div></div>
+    <div class="card section active" data-section="Global Overview"><h2>Global Overview</h2><div id="overviewInterpretation" class="muted"></div><div id="overviewChart" style="height:300px;"></div></div>
+    <div class="card section" data-section="Markets"><h2>Equity markets</h2><div class="muted" id="equityInterpretation"></div><div style="overflow:auto;"><table><thead><tr><th>Index</th><th>Last</th><th>5D%</th><th>Status</th><th>Interpretation</th></tr></thead><tbody id="equityBody"></tbody></table></div></div>
+    <div class="card section" data-section="Rates & FX"><h2>Rates & FX</h2><div class="muted" id="ratesFxInterpretation"></div><div class="grid"><div class="span-6"><table><thead><tr><th>Rate</th><th>Last</th><th>5D</th><th>Interpretation</th></tr></thead><tbody id="ratesBody"></tbody></table></div><div class="span-6"><table><thead><tr><th>FX</th><th>Last</th><th>5D%</th><th>Interpretation</th></tr></thead><tbody id="fxBody"></tbody></table></div></div></div>
+    <div class="card section" data-section="Commodities"><h2>Commodities & Crypto</h2><div class="muted" id="commoditiesInterpretation"></div><div class="grid"><div class="span-8"><table><thead><tr><th>Asset</th><th>Last</th><th>5D%</th><th>Interpretation</th></tr></thead><tbody id="commodityBody"></tbody></table></div><div class="span-4"><table><thead><tr><th>Crypto</th><th>Last</th><th>5D%</th></tr></thead><tbody id="cryptoBody"></tbody></table></div></div></div>
+    <div class="card section" data-section="Economy"><h2>Economy</h2><div class="muted" id="economyInterpretation"></div><table><thead><tr><th>Indicator</th><th>Latest</th><th>Prior</th><th>Trend</th><th>Notes</th></tr></thead><tbody id="economyBody"></tbody></table></div>
+    <div class="card section" data-section="News"><h2>Most important news</h2><div class="grid"><div class="span-4"><h3>Macro</h3><table><tbody id="newsMacro"></tbody></table></div><div class="span-4"><h3>Markets</h3><table><tbody id="newsMarkets"></tbody></table></div><div class="span-4"><h3>Geopolitical / risk</h3><table><tbody id="newsGeo"></tbody></table></div></div></div>
+  </div>
+</div>
+<script>
+const sections = ['Global Overview','Markets','Rates & FX','Commodities','Economy','News'];
+function fmt(v,d=2){ return (v===null||v===undefined||Number.isNaN(Number(v))) ? '-' : Number(v).toFixed(d); }
+function rowCls(v){ if (v===null||v===undefined) return 'neutral'; if (v>0.7) return 'ok'; if (v<-0.7) return 'bad'; return 'warn'; }
+function toNewsRows(rows){ return (rows||[]).map(r=>`<tr><td><a href="${r.link||'#'}" target="_blank">${r.title||'-'}</a><div class="muted">${r.source||'-'} | ${r.published||'-'}</div></td></tr>`).join(''); }
+function initTabs(){ const host=document.getElementById('tabs'); host.innerHTML=sections.map((s,i)=>`<div class="tab ${i===0?'active':''}" data-tab="${s}">${s}</div>`).join(''); host.querySelectorAll('.tab').forEach(t=>t.onclick=()=>activateTab(t.dataset.tab)); }
+function activateTab(name){ document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name)); document.querySelectorAll('.section').forEach(s=>s.classList.toggle('active', s.dataset.section===name)); }
+function renderRegimes(reg){ const panel=document.getElementById('regimePanel'); const items=[['Risk',reg.global_risk_regime],['Growth',reg.growth_regime],['Inflation',reg.inflation_regime],['Liquidity',reg.liquidity_regime],['Stress',reg.market_stress_regime]]; panel.innerHTML=items.map(([k,v])=>`<div><div class="muted">${k}</div><span class="pill ${v.class||'neutral'}">${v.label||'-'}</span></div>`).join(''); }
+function renderTable(id, rows, mapper){ document.getElementById(id).innerHTML=(rows||[]).map(mapper).join(''); }
+async function loadMacro(){
+  const r=await fetch('/api/macro/dashboard'); const d=await r.json();
+  document.getElementById('summaryText').textContent = d.summary?.human_summary || 'No summary.';
+  document.getElementById('overviewInterpretation').textContent = d.summary?.overview_interpretation || '';
+  renderRegimes(d.summary?.regimes || {});
+  document.getElementById('notices').textContent = (d.runtime_notices||[]).join(' | ');
+  renderTable('equityBody', d.markets?.equities, x=>`<tr><td>${x.name}</td><td>${fmt(x.last)}</td><td>${fmt(x.change_5d_pct)}</td><td><span class="pill ${rowCls(x.change_5d_pct)}">${x.signal||'-'}</span></td><td>${x.interpretation||''}</td></tr>`);
+  renderTable('ratesBody', d.rates?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last)}</td><td>${fmt(x.change_5d)}</td><td>${x.interpretation||''}</td></tr>`);
+  renderTable('fxBody', d.fx?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last,4)}</td><td>${fmt(x.change_5d_pct)}</td><td>${x.interpretation||''}</td></tr>`);
+  renderTable('commodityBody', d.commodities?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last)}</td><td>${fmt(x.change_5d_pct)}</td><td>${x.interpretation||''}</td></tr>`);
+  renderTable('cryptoBody', d.crypto?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last)}</td><td>${fmt(x.change_5d_pct)}</td></tr>`);
+  renderTable('economyBody', d.economy?.indicators, x=>`<tr><td>${x.name}</td><td>${fmt(x.latest)}</td><td>${fmt(x.prior)}</td><td>${x.trend||'-'}</td><td>${x.interpretation||''}</td></tr>`);
+  document.getElementById('equityInterpretation').textContent = d.markets?.interpretation || '';
+  document.getElementById('ratesFxInterpretation').textContent = d.rates_fx_interpretation || '';
+  document.getElementById('commoditiesInterpretation').textContent = d.commodities?.interpretation || '';
+  document.getElementById('economyInterpretation').textContent = d.economy?.interpretation || '';
+  document.getElementById('newsMacro').innerHTML = toNewsRows(d.news?.macro);
+  document.getElementById('newsMarkets').innerHTML = toNewsRows(d.news?.markets);
+  document.getElementById('newsGeo').innerHTML = toNewsRows(d.news?.geopolitical);
+  const heat = d.markets?.equities?.slice(0,10)||[];
+  Plotly.newPlot('overviewChart',[{type:'bar',x:heat.map(x=>x.name),y:heat.map(x=>x.change_5d_pct),marker:{color:heat.map(x=>x.change_5d_pct>=0?'#34d399':'#f87171')}}],{paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:'#e7edff'}},{displayModeBar:false,responsive:true});
+}
+initTabs(); loadMacro(); document.getElementById('refreshBtn').onclick=loadMacro;
 </script>
 </body>
 </html>"""
@@ -1958,6 +2043,231 @@ def build_watchlist_snapshot() -> list[dict[str, Any]]:
     return rows
 
 
+def _safe_pct_change(curr: float | None, prev: float | None) -> float | None:
+    if curr is None or prev in (None, 0):
+        return None
+    return ((curr / prev) - 1.0) * 100.0
+
+
+def _series_signal(change: float | None, positive_label: str = "Improving", negative_label: str = "Deteriorating") -> str:
+    if change is None:
+        return "Stable"
+    if change > 0.7:
+        return positive_label
+    if change < -0.7:
+        return negative_label
+    return "Stable"
+
+
+def history_last_and_prev(symbol: str, period: str = "3mo", value_col: str = "Close") -> tuple[float | None, float | None]:
+    try:
+        hist = yf.Ticker(symbol).history(period=period, auto_adjust=False)
+        vals = hist.get(value_col, pd.Series(dtype=float)).dropna()
+        if len(vals) < 2:
+            return None, None
+        return safe_float(vals.iloc[-1]), safe_float(vals.iloc[-2])
+    except Exception:
+        return None, None
+
+
+def get_fred_indicator(series_id: str) -> tuple[float | None, float | None]:
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        df = pd.read_csv(url)
+        if "VALUE" not in df.columns:
+            return None, None
+        ser = pd.to_numeric(df["VALUE"], errors="coerce").dropna()
+        if len(ser) < 2:
+            return (safe_float(ser.iloc[-1]) if len(ser) else None), None
+        return safe_float(ser.iloc[-1]), safe_float(ser.iloc[-2])
+    except Exception:
+        return None, None
+
+
+def build_market_block(symbol_map: dict[str, tuple[str, str]], pct: bool = True) -> tuple[list[dict[str, Any]], list[str]]:
+    rows, notices = [], []
+    for name, (symbol, interp) in symbol_map.items():
+        last, prev = history_last_and_prev(symbol)
+        if last is None:
+            notices.append(f"{name} unavailable")
+        change = _safe_pct_change(last, prev) if pct else (None if last is None or prev is None else last - prev)
+        rows.append({
+            "name": name,
+            "symbol": symbol,
+            "last": last,
+            "prev": prev,
+            "change_5d_pct": change if pct else None,
+            "change_5d": None if pct else change,
+            "signal": _series_signal(change),
+            "interpretation": interp,
+        })
+    return rows, notices
+
+
+def build_macro_dashboard_payload() -> dict[str, Any]:
+    notices: list[str] = []
+    equities_map = {
+        "S&P 500": ("^GSPC", "US large-cap risk benchmark."),
+        "Nasdaq 100": ("^NDX", "Growth and duration-sensitive equity benchmark."),
+        "Dow Jones": ("^DJI", "Blue-chip industrial benchmark."),
+        "Russell 2000": ("^RUT", "Small-cap domestic growth sensitivity."),
+        "VIX": ("^VIX", "Higher implied volatility reflects stress."),
+        "Euro Stoxx 50": ("^STOXX50E", "Eurozone blue-chip equity pulse."),
+        "DAX": ("^GDAXI", "German cyclical and exporter exposure."),
+        "CAC 40": ("^FCHI", "French large-cap benchmark."),
+        "FTSE 100": ("^FTSE", "UK large-cap/global commodity tilt."),
+        "IBEX 35": ("^IBEX", "Spanish equity benchmark."),
+        "Nikkei 225": ("^N225", "Japan equity benchmark."),
+        "TOPIX": ("^TOPX", "Broader Japanese market breadth."),
+        "Hang Seng": ("^HSI", "Hong Kong / China risk sentiment."),
+        "Shanghai Composite": ("000001.SS", "Mainland China benchmark."),
+        "Shenzhen Composite": ("399001.SZ", "China growth/tech sensitivity."),
+        "Sensex": ("^BSESN", "India benchmark."),
+        "Nifty 50": ("^NSEI", "India large-cap benchmark."),
+        "ASX 200": ("^AXJO", "Australia benchmark with commodity tilt."),
+        "EM Equities (EEM)": ("EEM", "Emerging markets risk appetite proxy."),
+    }
+    rates_market_map = {
+        "US 2Y Treasury": ("^UST2Y", "Short-end policy sensitivity."),
+        "US 10Y Treasury": ("^TNX", "Long-end growth/inflation expectations."),
+        "US 30Y Treasury": ("^TYX", "Long-duration term premium signal."),
+        "German 10Y Bund": ("^DE10YB", "Eurozone sovereign core benchmark."),
+        "UK 10Y Gilt": ("^UK10YT", "UK sovereign benchmark."),
+        "Japan 10Y JGB": ("^JP10Y", "Japan rate control and inflation shift."),
+    }
+    fx_map = {
+        "DXY": ("DX-Y.NYB", "A rising dollar tightens global financial conditions."),
+        "EUR/USD": ("EURUSD=X", "Core developed-market FX gauge."),
+        "USD/JPY": ("JPY=X", "Rate differential and BoJ regime sensitivity."),
+        "GBP/USD": ("GBPUSD=X", "Sterling growth/rates signal."),
+        "USD/CNY": ("CNY=X", "China currency and policy pressure proxy."),
+        "USD/CHF": ("CHF=X", "Safe-haven flow gauge."),
+    }
+    commodities_map = {
+        "WTI Crude": ("CL=F", "Oil strength can reflect demand and inflation pressure."),
+        "Brent Crude": ("BZ=F", "Global oil benchmark."),
+        "Natural Gas": ("NG=F", "Energy volatility and supply stress signal."),
+        "Gold": ("GC=F", "Real yield and risk-hedge proxy."),
+        "Silver": ("SI=F", "Mixed industrial/precious metal signal."),
+        "Copper": ("HG=F", "Global industrial activity pulse."),
+        "Corn": ("ZC=F", "Agricultural inflation proxy."),
+    }
+    crypto_map = {"BTC": ("BTC-USD", "Alternative risk appetite proxy."), "ETH": ("ETH-USD", "Broader crypto-beta gauge.")}
+    credit_map = {
+        "High Yield (HYG)": ("HYG", "High-yield spread/risk proxy."),
+        "Investment Grade (LQD)": ("LQD", "Investment-grade credit condition proxy."),
+        "VIX": ("^VIX", "Equity volatility stress proxy."),
+    }
+    equities, eq_notices = build_market_block(equities_map, pct=True)
+    rates, rate_notices = build_market_block(rates_market_map, pct=False)
+    fx, fx_notices = build_market_block(fx_map, pct=True)
+    commodities, com_notices = build_market_block(commodities_map, pct=True)
+    crypto, cry_notices = build_market_block(crypto_map, pct=True)
+    credit, cred_notices = build_market_block(credit_map, pct=True)
+    notices.extend(eq_notices + rate_notices + fx_notices + com_notices + cry_notices + cred_notices)
+
+    # Reliable FRED fallback for sovereign curve and key macro.
+    dgs2, dgs2_prev = get_fred_indicator("DGS2")
+    dgs10, dgs10_prev = get_fred_indicator("DGS10")
+    dgs30, dgs30_prev = get_fred_indicator("DGS30")
+    t102y, t102y_prev = get_fred_indicator("T10Y2Y")
+    if any(x is not None for x in [dgs2, dgs10, dgs30]):
+        rates = [
+            {"name": "US 2Y Treasury", "last": dgs2, "prior": dgs2_prev, "change_5d": None if dgs2 is None or dgs2_prev is None else dgs2 - dgs2_prev, "interpretation": "Short-end policy sensitivity."},
+            {"name": "US 10Y Treasury", "last": dgs10, "prior": dgs10_prev, "change_5d": None if dgs10 is None or dgs10_prev is None else dgs10 - dgs10_prev, "interpretation": "Long-end growth/inflation expectations."},
+            {"name": "US 30Y Treasury", "last": dgs30, "prior": dgs30_prev, "change_5d": None if dgs30 is None or dgs30_prev is None else dgs30 - dgs30_prev, "interpretation": "Long-duration term premium signal."},
+            {"name": "10Y-2Y Curve Spread", "last": t102y, "prior": t102y_prev, "change_5d": None if t102y is None or t102y_prev is None else t102y - t102y_prev, "interpretation": "Inversion typically signals growth concerns."},
+        ]
+
+    econ_specs = [
+        ("CPI (YoY)", "CPIAUCSL", "Inflation level; direction matters for policy."),
+        ("Core CPI", "CPILFESL", "Underlying inflation pressure."),
+        ("Unemployment", "UNRATE", "Labor slack and recession risk signal."),
+        ("Payrolls", "PAYEMS", "Labor demand pulse."),
+        ("GDP", "GDP", "Aggregate growth backdrop."),
+        ("ISM Manufacturing PMI", "NAPM", "Factory momentum signal."),
+        ("Services PMI", "NAPMS", "Service-sector activity."),
+        ("Retail Sales", "RSAFS", "Consumer demand proxy."),
+        ("Housing Permits", "PERMIT", "Forward housing activity indicator."),
+        ("Consumer Confidence", "UMCSENT", "Household sentiment proxy."),
+        ("Fed Funds Rate", "FEDFUNDS", "Federal Reserve policy stance."),
+        ("ECB Deposit Rate", "ECBDFR", "ECB policy stance."),
+        ("BoE Policy Rate", "IR3TIB01GBM156N", "BoE policy proxy."),
+        ("BoJ Policy Rate", "IRSTCI01JPM156N", "BoJ policy proxy."),
+    ]
+    econ_rows = []
+    for name, series_id, interp in econ_specs:
+        latest, prior = get_fred_indicator(series_id)
+        if latest is None:
+            notices.append(f"{name} unavailable")
+        trend = "stable"
+        if latest is not None and prior is not None:
+            if latest > prior:
+                trend = "rising"
+            elif latest < prior:
+                trend = "falling"
+        econ_rows.append({"name": name, "latest": latest, "prior": prior, "trend": trend, "interpretation": interp})
+
+    risk_score = sum((x.get("change_5d_pct") or 0) for x in equities if x["name"] in {"S&P 500", "Nasdaq 100", "EM Equities (EEM)"}) / 3.0
+    vix_row = next((x for x in equities if x["name"] == "VIX"), {})
+    vix_change = vix_row.get("change_5d_pct")
+    inflation_row = next((x for x in econ_rows if x["name"] == "CPI (YoY)"), {})
+    growth_row = next((x for x in econ_rows if x["name"] == "GDP"), {})
+    curve_row = next((x for x in rates if x["name"] == "10Y-2Y Curve Spread"), {})
+    credit_score = sum((x.get("change_5d_pct") or 0) for x in credit if x["name"] in {"High Yield (HYG)", "Investment Grade (LQD)"}) / 2.0
+
+    regimes = {
+        "global_risk_regime": {"label": "risk-on" if risk_score > 0 else "risk-off", "class": "ok" if risk_score > 0 else "bad"},
+        "growth_regime": {"label": "growth strengthening" if (growth_row.get("trend") == "rising") else ("growth weakening" if growth_row.get("trend") == "falling" else "stable"), "class": "ok" if growth_row.get("trend") == "rising" else ("bad" if growth_row.get("trend") == "falling" else "neutral")},
+        "inflation_regime": {"label": "inflation pressure rising" if inflation_row.get("trend") == "rising" else ("inflation pressure easing" if inflation_row.get("trend") == "falling" else "stable"), "class": "bad" if inflation_row.get("trend") == "rising" else ("ok" if inflation_row.get("trend") == "falling" else "neutral")},
+        "liquidity_regime": {"label": "dollar tightening" if (next((x.get("change_5d_pct") for x in fx if x["name"] == "DXY"), 0) or 0) > 0 else "liquidity easing", "class": "warn" if (next((x.get("change_5d_pct") for x in fx if x["name"] == "DXY"), 0) or 0) > 0 else "ok"},
+        "market_stress_regime": {"label": "deteriorating" if (vix_change or 0) > 0 else "improving", "class": "bad" if (vix_change or 0) > 0 else "ok"},
+    }
+
+    summary_sentence = (
+        f"Global growth is {regimes['growth_regime']['label'].replace('growth ', '')} while risk assets are "
+        f"{'resilient' if regimes['global_risk_regime']['label']=='risk-on' else 'fragile'}. "
+        f"Inflation is {('easing' if regimes['inflation_regime']['label'].endswith('easing') else 'still a pressure point')}, "
+        f"and curve spread at {fmt_value(curve_row.get('last'))} keeps recession debate active."
+    )
+
+    news_macro = get_news_google_rss("global economy inflation central bank recession risk", limit=8)
+    news_markets = get_news_google_rss("equities bonds yields commodities market volatility", limit=8)
+    news_geo = get_news_google_rss("geopolitics sanctions conflict oil supply market risk", limit=8)
+
+    return {
+        "summary": {
+            "regimes": regimes,
+            "human_summary": summary_sentence,
+            "overview_interpretation": "Risk, growth, inflation, liquidity and stress are synthesized so major macro inflections are visible in one decision panel.",
+            "risk_on_off_composite": risk_score,
+            "credit_composite": credit_score,
+        },
+        "markets": {
+            "equities": equities,
+            "interpretation": "Equity breadth and volatility jointly indicate whether the market is absorbing or rejecting macro risk."
+        },
+        "rates": {"major": rates},
+        "fx": {"major": fx},
+        "rates_fx_interpretation": "Higher yields and a stronger dollar can tighten global conditions and pressure duration-sensitive assets.",
+        "commodities": {
+            "major": commodities,
+            "interpretation": "Oil and copper indicate growth and inflation cross-currents; gold helps track defensive demand."
+        },
+        "credit_risk": {
+            "major": credit,
+            "interpretation": "Credit ETFs and VIX together provide a practical stress proxy when full spread data is delayed."
+        },
+        "economy": {
+            "indicators": econ_rows,
+            "interpretation": "Economic releases are displayed with trend direction to clarify whether growth and inflation momentum is improving or deteriorating."
+        },
+        "crypto": {"major": crypto},
+        "news": {"macro": news_macro[:5], "markets": news_markets[:5], "geopolitical": news_geo[:5]},
+        "runtime_notices": sorted(set(notices))[:18],
+    }
+
+
 def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
     rows = []
     for ticker in choose_universe(mode):
@@ -2056,6 +2366,11 @@ def build_peer_snapshot(base_ticker: str) -> list[dict[str, Any]]:
 def home() -> str:
     init_db()
     return render_template_string(APP_HTML)
+
+
+@app.route("/macro")
+def macro_dashboard() -> str:
+    return render_template_string(MACRO_HTML)
 
 
 @app.route("/api/analyze")
@@ -2177,6 +2492,11 @@ def analyze() -> Any:
 def screener() -> Any:
     mode = (request.args.get("universe") or "core").strip().lower()
     return jsonify({"rows": build_screener_snapshot(mode)})
+
+
+@app.route("/api/macro/dashboard")
+def macro_dashboard_api() -> Any:
+    return jsonify(build_macro_dashboard_payload())
 
 
 @app.route("/api/save", methods=["POST"])

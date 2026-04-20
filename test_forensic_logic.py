@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from forensic_dashboard_app import (
+    build_macro_dashboard_payload,
     build_forensic_breakdown,
     build_forensic_components,
     build_grouped_signals,
@@ -16,6 +17,40 @@ from forensic_dashboard_app import (
 
 
 class ForensicLogicTests(unittest.TestCase):
+    def test_macro_dashboard_payload_structure(self):
+        def fake_market_block(symbol_map, pct=True):
+            rows = []
+            for i, name in enumerate(symbol_map.keys()):
+                rows.append(
+                    {
+                        "name": name,
+                        "symbol": "X",
+                        "last": 100 + i,
+                        "prev": 99 + i,
+                        "change_5d_pct": 1.0 if pct else None,
+                        "change_5d": 0.1 if not pct else None,
+                        "signal": "Improving",
+                        "interpretation": "ok",
+                    }
+                )
+            return rows, []
+
+        with patch("forensic_dashboard_app.build_market_block", side_effect=fake_market_block), patch(
+            "forensic_dashboard_app.get_fred_indicator", return_value=(2.0, 1.9)
+        ), patch("forensic_dashboard_app.get_news_google_rss", return_value=[{"title": "t", "source": "s", "published": "d", "link": "l"}]):
+            payload = build_macro_dashboard_payload()
+
+        self.assertIn("summary", payload)
+        self.assertIn("markets", payload)
+        self.assertIn("rates", payload)
+        self.assertIn("fx", payload)
+        self.assertIn("commodities", payload)
+        self.assertIn("economy", payload)
+        self.assertIn("news", payload)
+        self.assertIn("runtime_notices", payload)
+        self.assertIn("human_summary", payload["summary"])
+        self.assertTrue(payload["markets"]["equities"])
+
     def test_revenue_growth_with_margin_deterioration(self):
         rows = [
             {"period": "2024-12-31", "revenue": 1000, "net_income": 140, "cfo": 150, "revenue_growth": 0.05, "cfo_ni": 1.07},
