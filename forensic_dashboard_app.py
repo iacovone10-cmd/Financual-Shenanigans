@@ -789,6 +789,7 @@ function initTabs(){ const host=document.getElementById('tabs'); host.innerHTML=
 function activateTab(name){ document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name)); document.querySelectorAll('.section').forEach(s=>s.classList.toggle('active', s.dataset.section===name)); }
 function renderRegimes(reg){ const panel=document.getElementById('regimePanel'); const items=[['Risk',reg.global_risk_regime],['Growth',reg.growth_regime],['Inflation',reg.inflation_regime],['Liquidity',reg.liquidity_regime],['Stress',reg.market_stress_regime]]; panel.innerHTML=items.map(([k,v])=>`<div><div class="muted">${k}</div><span class="pill ${v.class||'neutral'}">${v.label||'-'}</span></div>`).join(''); }
 function renderTable(id, rows, mapper){ document.getElementById(id).innerHTML=(rows||[]).map(mapper).join(''); }
+function fmtIndicator(v, unit=null, d=2){ const base = fmt(v,d); return base==='-' ? base : (unit==='pct' ? `${base}%` : base); }
 async function loadMacro(){
   const r=await fetch('/api/macro/dashboard'); const d=await r.json();
   document.getElementById('summaryText').textContent = d.summary?.human_summary || 'No summary.';
@@ -800,7 +801,7 @@ async function loadMacro(){
   renderTable('fxBody', d.fx?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last,4)}</td><td>${fmt(x.change_5d_pct)}</td><td>${x.interpretation||''}</td></tr>`);
   renderTable('commodityBody', d.commodities?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last)}</td><td>${fmt(x.change_5d_pct)}</td><td>${x.interpretation||''}</td></tr>`);
   renderTable('cryptoBody', d.crypto?.major, x=>`<tr><td>${x.name}</td><td>${fmt(x.last)}</td><td>${fmt(x.change_5d_pct)}</td></tr>`);
-  renderTable('economyBody', d.economy?.indicators, x=>`<tr><td>${x.name}</td><td>${fmt(x.latest)}</td><td>${fmt(x.prior)}</td><td>${x.trend||'-'}</td><td>${x.interpretation||''}</td></tr>`);
+  renderTable('economyBody', d.economy?.indicators, x=>`<tr><td>${x.name}</td><td>${fmtIndicator(x.latest, x.unit)}</td><td>${fmtIndicator(x.prior, x.unit)}</td><td>${x.trend||'-'}</td><td>${x.interpretation||''}</td></tr>`);
   document.getElementById('equityInterpretation').textContent = d.markets?.interpretation || '';
   document.getElementById('ratesFxInterpretation').textContent = d.rates_fx_interpretation || '';
   document.getElementById('commoditiesInterpretation').textContent = d.commodities?.interpretation || '';
@@ -2108,6 +2109,44 @@ def get_fred_indicator(series_id: str) -> tuple[float | None, float | None]:
         return None, None
 
 
+def get_fred_yoy_pct(series_id: str, periods_back: int = 12) -> tuple[float | None, float | None]:
+    if FRED_API_KEY:
+        try:
+            resp = requests.get(
+                "https://api.stlouisfed.org/fred/series/observations",
+                params={
+                    "series_id": series_id,
+                    "api_key": FRED_API_KEY,
+                    "file_type": "json",
+                    "sort_order": "asc",
+                },
+                timeout=12,
+            )
+            resp.raise_for_status()
+            observations = resp.json().get("observations", [])
+            ser = pd.Series([safe_float(obs.get("value")) for obs in observations], dtype=float).dropna()
+            yoy = (ser / ser.shift(periods_back) - 1.0) * 100.0
+            yoy = yoy.dropna()
+            if len(yoy) < 2:
+                return (safe_float(yoy.iloc[-1]) if len(yoy) else None), None
+            return safe_float(yoy.iloc[-1]), safe_float(yoy.iloc[-2])
+        except Exception:
+            pass
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        df = pd.read_csv(url)
+        if "VALUE" not in df.columns:
+            return None, None
+        ser = pd.to_numeric(df["VALUE"], errors="coerce").dropna()
+        yoy = (ser / ser.shift(periods_back) - 1.0) * 100.0
+        yoy = yoy.dropna()
+        if len(yoy) < 2:
+            return (safe_float(yoy.iloc[-1]) if len(yoy) else None), None
+        return safe_float(yoy.iloc[-1]), safe_float(yoy.iloc[-2])
+    except Exception:
+        return None, None
+
+
 def build_market_block(symbol_map: dict[str, tuple[str, str]], pct: bool = True) -> tuple[list[dict[str, Any]], list[str]]:
     rows, notices = [], []
     for name, (symbol, interp) in symbol_map.items():
@@ -2204,24 +2243,28 @@ def build_macro_dashboard_payload() -> dict[str, Any]:
         ]
 
     econ_specs = [
-        ("CPI (YoY)", "CPIAUCSL", "Inflation level; direction matters for policy."),
-        ("Core CPI", "CPILFESL", "Underlying inflation pressure."),
-        ("Unemployment", "UNRATE", "Labor slack and recession risk signal."),
-        ("Payrolls", "PAYEMS", "Labor demand pulse."),
-        ("GDP", "GDP", "Aggregate growth backdrop."),
-        ("ISM Manufacturing PMI", "NAPM", "Factory momentum signal."),
-        ("Services PMI", "NAPMS", "Service-sector activity."),
-        ("Retail Sales", "RSAFS", "Consumer demand proxy."),
-        ("Housing Permits", "PERMIT", "Forward housing activity indicator."),
-        ("Consumer Confidence", "UMCSENT", "Household sentiment proxy."),
-        ("Fed Funds Rate", "FEDFUNDS", "Federal Reserve policy stance."),
-        ("ECB Deposit Rate", "ECBDFR", "ECB policy stance."),
-        ("BoE Policy Rate", "IR3TIB01GBM156N", "BoE policy proxy."),
-        ("BoJ Policy Rate", "IRSTCI01JPM156N", "BoJ policy proxy."),
+        {"name": "CPI (YoY)", "series_id": "CPIAUCSL", "interpretation": "Inflation level; direction matters for policy.", "calc": "yoy_pct", "unit": "pct"},
+        {"name": "Core CPI", "series_id": "CPILFESL", "interpretation": "Underlying inflation pressure.", "calc": "yoy_pct", "unit": "pct"},
+        {"name": "Unemployment", "series_id": "UNRATE", "interpretation": "Labor slack and recession risk signal."},
+        {"name": "Payrolls", "series_id": "PAYEMS", "interpretation": "Labor demand pulse."},
+        {"name": "GDP", "series_id": "GDP", "interpretation": "Aggregate growth backdrop."},
+        {"name": "ISM Manufacturing PMI", "series_id": "NAPM", "interpretation": "Factory momentum signal."},
+        {"name": "Services PMI", "series_id": "NAPMS", "interpretation": "Service-sector activity."},
+        {"name": "Retail Sales", "series_id": "RSAFS", "interpretation": "Consumer demand proxy."},
+        {"name": "Housing Permits", "series_id": "PERMIT", "interpretation": "Forward housing activity indicator."},
+        {"name": "Consumer Confidence", "series_id": "UMCSENT", "interpretation": "Household sentiment proxy."},
+        {"name": "Fed Funds Rate", "series_id": "FEDFUNDS", "interpretation": "Federal Reserve policy stance."},
+        {"name": "ECB Deposit Rate", "series_id": "ECBDFR", "interpretation": "ECB policy stance."},
+        {"name": "BoE Policy Rate", "series_id": "IR3TIB01GBM156N", "interpretation": "BoE policy proxy."},
+        {"name": "BoJ Policy Rate", "series_id": "IRSTCI01JPM156N", "interpretation": "BoJ policy proxy."},
     ]
     econ_rows = []
-    for name, series_id, interp in econ_specs:
-        latest, prior = get_fred_indicator(series_id)
+    for spec in econ_specs:
+        name = spec["name"]
+        series_id = spec["series_id"]
+        interp = spec["interpretation"]
+        calc = spec.get("calc")
+        latest, prior = get_fred_yoy_pct(series_id) if calc == "yoy_pct" else get_fred_indicator(series_id)
         if latest is None:
             notices.append(f"{name} unavailable")
         trend = "stable"
@@ -2230,7 +2273,7 @@ def build_macro_dashboard_payload() -> dict[str, Any]:
                 trend = "rising"
             elif latest < prior:
                 trend = "falling"
-        econ_rows.append({"name": name, "latest": latest, "prior": prior, "trend": trend, "interpretation": interp})
+        econ_rows.append({"name": name, "latest": latest, "prior": prior, "trend": trend, "interpretation": interp, "unit": spec.get("unit")})
 
     risk_score = sum((x.get("change_5d_pct") or 0) for x in equities if x["name"] in {"S&P 500", "Nasdaq 100", "EM Equities (EEM)"}) / 3.0
     vix_row = next((x for x in equities if x["name"] == "VIX"), {})
