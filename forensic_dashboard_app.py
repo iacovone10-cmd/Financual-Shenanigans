@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import ssl
 import sqlite3
@@ -32,6 +33,7 @@ CORE_SCREENER_UNIVERSE = DEFAULT_WATCHLIST + [
     "ORCL", "LLY", "ADBE", "TMO", "AMGN", "LIN", "QCOM", "TXN", "HON", "COP"
 ]
 _SP500_CACHE: list[str] | None = None
+FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
 
 APP_HTML = r"""<!doctype html>
 <html lang="en">
@@ -2071,6 +2073,28 @@ def history_last_and_prev(symbol: str, period: str = "3mo", value_col: str = "Cl
 
 
 def get_fred_indicator(series_id: str) -> tuple[float | None, float | None]:
+    if FRED_API_KEY:
+        try:
+            resp = requests.get(
+                "https://api.stlouisfed.org/fred/series/observations",
+                params={
+                    "series_id": series_id,
+                    "api_key": FRED_API_KEY,
+                    "file_type": "json",
+                    "sort_order": "desc",
+                    "limit": 6,
+                },
+                timeout=12,
+            )
+            resp.raise_for_status()
+            observations = resp.json().get("observations", [])
+            values = [safe_float(obs.get("value")) for obs in observations]
+            values = [v for v in values if v is not None]
+            if len(values) < 2:
+                return (values[0] if values else None), None
+            return values[0], values[1]
+        except Exception:
+            pass
     try:
         url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
         df = pd.read_csv(url)
