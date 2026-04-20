@@ -2,9 +2,16 @@ import unittest
 from unittest.mock import patch
 
 from forensic_dashboard_app import (
+    build_forensic_breakdown,
     build_forensic_components,
+    build_grouped_signals,
+    build_quality_explanation,
+    build_red_flag_highlights,
     build_screener_snapshot,
+    classify_earnings_quality,
     classify_persistence,
+    compute_forensic_score,
+    generate_flags,
 )
 
 
@@ -89,6 +96,30 @@ class ForensicLogicTests(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 1)
         self.assertEqual(rows[0]["ticker"], "BBB")
         self.assertTrue(rows[0]["reason"])
+        self.assertIn("quality_classification", rows[0])
+        self.assertIn("red_flag_count", rows[0])
+
+    def test_quality_classification_and_explanation(self):
+        quality_rows = [
+            {"period": "2023", "revenue": 1000, "net_income": 140, "cfo": 75, "cfo_ni": 0.54, "beneish_m": -1.62, "dsri": 1.28, "revenue_growth": 0.14, "ar_growth": 0.42, "non_operating_income": 20},
+            {"period": "2024", "revenue": 1160, "net_income": 145, "cfo": 70, "cfo_ni": 0.48, "beneish_m": -1.55, "dsri": 1.35, "revenue_growth": 0.16, "ar_growth": 0.53, "non_operating_income": 28, "asset_sale_gain": 8},
+            {"period": "2025", "revenue": 1280, "net_income": 150, "cfo": 68, "cfo_ni": 0.45, "beneish_m": -1.48, "dsri": 1.41, "revenue_growth": 0.12, "ar_growth": 0.6, "inventory_growth": 0.5, "payables_growth": -0.22, "non_operating_income": 32, "one_time_gain": 10},
+        ]
+        text_signals = [{"signal": "material weakness", "hits": 2, "interpretation": "Internal control weakness disclosed."}]
+        flags, risk, latest_cfo_ni, beneish, components = generate_flags(quality_rows, text_signals=text_signals)
+
+        score, _, _ = compute_forensic_score(latest_cfo_ni, beneish, len(flags), components=components, text_signals=text_signals)
+        classification = classify_earnings_quality(score, risk, flags, components=components, text_signals=text_signals)
+        breakdown = build_forensic_breakdown(quality_rows, components, flags, text_signals, score)
+        highlights = build_red_flag_highlights(flags, components)
+        explanation = build_quality_explanation(classification, breakdown, highlights)
+        grouped = build_grouped_signals(components, text_signals, flags)
+
+        self.assertIn(classification, {"HIGH RISK", "LOW QUALITY"})
+        self.assertTrue(explanation.startswith(classification))
+        self.assertTrue(any(x["severity"] in {"HIGH", "MEDIUM"} for x in highlights))
+        self.assertIn("cash_flow_quality", grouped)
+        self.assertIn("score_components", breakdown)
 
     def test_classify_persistence(self):
         self.assertEqual(classify_persistence(0), "none")
