@@ -188,12 +188,19 @@ APP_HTML = r"""<!doctype html>
     .small { font-size: 12px; }
     .chips { display: flex; flex-wrap: wrap; gap: 8px; }
     .chip { border: 1px solid var(--border); padding: 9px 11px; border-radius: 999px; font-size: 12px; color: var(--muted); background: rgba(255,255,255,0.04); }
+    .evidence-wall { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .evidence-card { border: 1px solid var(--border); border-radius: 18px; padding: 12px; background: rgba(255,255,255,0.04); }
+    .evidence-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; }
+    .evidence-title { font-weight: 800; margin-bottom: 6px; }
+    .evidence-copy { color: var(--muted); font-size: 13px; line-height: 1.4; }
+    .evidence-source { margin-top: 10px; color: var(--muted); font-size: 12px; }
     @media (max-width: 1380px) {
       .topbar { grid-template-columns: 1fr 1fr 1fr; }
       .hero { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, 1fr); }
       .heat-grid { grid-template-columns: repeat(3, 1fr); }
       .hero-screener { grid-template-columns: 1fr; }
+      .evidence-wall { grid-template-columns: 1fr; }
       .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
     }
     @media (max-width: 720px) {
@@ -294,6 +301,9 @@ APP_HTML = r"""<!doctype html>
       <div class="panel span-4"><div class="section-title"><h2>10-K text signals</h2><span class="muted">Automatic filing scan</span></div><div style="overflow:auto;"><table><thead><tr><th>Signal</th><th>Hits</th><th>Interpretation</th></tr></thead><tbody id="textSignalsBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>Item 7 excerpt</h2><span class="muted">MD&A sample</span></div><div class="flags" id="item7Box"></div></div>
       <div class="panel span-4"><div class="section-title"><h2>Item 9A excerpt</h2><span class="muted">Controls sample</span></div><div class="flags" id="item9aBox"></div></div>
+
+      <div class="panel span-8"><div class="section-title"><h2>Non-operating & cost reduction evidence</h2><span class="muted">10-K / 10-Q text-based picture</span></div><div id="evidencePictureChart" style="height:320px;"></div></div>
+      <div class="panel span-4"><div class="section-title"><h2>Filing evidence snippets</h2><span class="muted">Primary-text extracts</span></div><div id="evidenceWall" class="evidence-wall"></div></div>
 
       <div class="panel span-6"><div class="section-title"><h2>10-K excerpts</h2><span class="muted">Keyword context</span></div><div class="flags" id="excerptBox"></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Decision engine</h2><span class="muted">Hedge Fund mode</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Meaning</th></tr></thead><tbody id="decisionBody"></tbody></table></div></div>
@@ -503,6 +513,63 @@ APP_HTML = r"""<!doctype html>
     document.getElementById('decisionBody').innerHTML = rows.map(r => `<tr><td>${r.metric}</td><td>${r.value}</td><td>${r.comment}</td></tr>`).join('');
   }
 
+  function renderEvidenceBoard(evidence) {
+    const wall = document.getElementById('evidenceWall');
+    if (!wall) return;
+    if (!evidence) {
+      wall.innerHTML = '<div class="evidence-card"><div class="evidence-title">No filing evidence available</div><div class="evidence-copy">Run analysis to extract non-operating and cost reduction language from filings.</div></div>';
+      return;
+    }
+    const source = evidence.source || {};
+    const sourceHtml = source.url ? `<a href="${source.url}" target="_blank">${source.form || 'Filing'} ${source.filing_date || ''}</a>` : `${source.form || 'Filing source unavailable'}`;
+    const nonOp = (evidence.non_operating_evidence || [])[0];
+    const cost = (evidence.cost_reduction_evidence || [])[0];
+    wall.innerHTML = `
+      <div class="evidence-card">
+        <div class="evidence-kicker">Non-operating / non-recurring</div>
+        <div class="evidence-title">${nonOp ? nonOp.keyword : 'No explicit trigger found'}</div>
+        <div class="evidence-copy">${nonOp ? nonOp.excerpt : 'No non-operating / non-recurring wording was automatically extracted from the latest filing text.'}</div>
+      </div>
+      <div class="evidence-card">
+        <div class="evidence-kicker">Cost reduction / efficiency</div>
+        <div class="evidence-title">${cost ? cost.keyword : 'No explicit trigger found'}</div>
+        <div class="evidence-copy">${cost ? cost.excerpt : 'No direct cost reduction wording was extracted from the latest filing text.'}</div>
+      </div>
+      <div class="evidence-card" style="grid-column: span 2;">
+        <div class="evidence-kicker">Source</div>
+        <div class="evidence-source">${sourceHtml}</div>
+        <div class="evidence-copy" style="margin-top:8px;">${evidence.summary || 'Evidence summary unavailable.'}</div>
+      </div>
+    `;
+  }
+
+  function renderEvidencePicture(evidence) {
+    if (!evidence || !evidence.chart_rows || !evidence.chart_rows.length) {
+      return;
+    }
+    const rows = evidence.chart_rows;
+    const colors = rows.map(r => r.group === 'non_operating' ? '#f87171' : '#34d399');
+    const trace = {
+      x: rows.map(r => r.hits),
+      y: rows.map(r => r.label),
+      type: 'bar',
+      orientation: 'h',
+      marker: { color: colors, line: { color: 'rgba(255,255,255,0.25)', width: 1 } },
+      text: rows.map(r => `${r.hits} hit${r.hits === 1 ? '' : 's'}`),
+      textposition: 'outside',
+      cliponaxis: false,
+    };
+    const layout = {
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      margin: { l: 150, r: 20, t: 10, b: 35 },
+      font: { color: '#edf2ff' },
+      xaxis: { title: 'Keyword hits in latest filing text', gridcolor: 'rgba(255,255,255,0.07)' },
+      yaxis: { automargin: true },
+    };
+    Plotly.newPlot('evidencePictureChart', [trace], layout, { responsive: true, displayModeBar: false });
+  }
+
   function renderWatchlist(rows) {
     document.getElementById('watchlistBody').innerHTML = rows.map(r => `<tr><td>${r.rank}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.risk}</td><td>${r.verdict}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${r.flag_count}</td></tr>`).join('');
   }
@@ -671,6 +738,8 @@ APP_HTML = r"""<!doctype html>
       renderExcerpts(data.text_excerpts || []);
       renderSingleExcerpt('item7Box', 'Item 7', data.item7_excerpt);
       renderSingleExcerpt('item9aBox', 'Item 9A', data.item9a_excerpt);
+      renderEvidencePicture(data.filing_evidence || null);
+      renderEvidenceBoard(data.filing_evidence || null);
       renderDecision(data.decision_table || []);
       renderWatchlist(data.watchlist || []);
       renderPeers(data.peers || []);
@@ -1710,6 +1779,77 @@ def analyze_filing_text(text: str) -> tuple[list[dict[str, Any]], list[dict[str,
     return signals, excerpts
 
 
+def build_filing_evidence_snapshot(text: str, filings: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    filings = filings or []
+    source = filings[0] if filings else {}
+    if not text:
+        return {
+            "source": source,
+            "non_operating_evidence": [],
+            "cost_reduction_evidence": [],
+            "chart_rows": [],
+            "summary": "No filing text available for evidence extraction.",
+        }
+
+    def collect_hits(terms: list[str], group: str, max_rows: int = 4) -> list[dict[str, Any]]:
+        lower = text.lower()
+        hits: list[dict[str, Any]] = []
+        for term in terms:
+            matches = list(re.finditer(re.escape(term), lower))
+            if not matches:
+                continue
+            idx = matches[0].start()
+            start, end = max(0, idx - 190), min(len(text), idx + len(term) + 240)
+            excerpt = text[start:end].strip()
+            hits.append(
+                {
+                    "group": group,
+                    "keyword": term,
+                    "hits": len(matches),
+                    "excerpt": excerpt[:420] + ("..." if len(excerpt) > 420 else ""),
+                    "label": term.replace("-", " ").title(),
+                }
+            )
+        hits.sort(key=lambda x: x["hits"], reverse=True)
+        return hits[:max_rows]
+
+    non_operating_terms = [
+        "non-operating", "non recurring", "non-recurring", "gain on sale", "asset sale",
+        "fair value", "tax benefit", "settlement gain", "other income",
+    ]
+    cost_terms = [
+        "cost reduction", "reduced costs", "cost savings", "efficiency program", "productivity",
+        "restructuring", "headcount reduction", "lower operating expenses",
+    ]
+    non_operating_evidence = collect_hits(non_operating_terms, "non_operating")
+    cost_reduction_evidence = collect_hits(cost_terms, "cost_reduction")
+    chart_rows = sorted(
+        [
+            *[
+                {"group": "non_operating", "label": r["label"], "hits": r["hits"]}
+                for r in non_operating_evidence
+            ],
+            *[
+                {"group": "cost_reduction", "label": r["label"], "hits": r["hits"]}
+                for r in cost_reduction_evidence
+            ],
+        ],
+        key=lambda x: x["hits"],
+        reverse=True,
+    )[:8]
+    summary = (
+        f"Detected {sum(r['hits'] for r in non_operating_evidence)} non-operating/non-recurring hits and "
+        f"{sum(r['hits'] for r in cost_reduction_evidence)} cost-reduction/efficiency hits in the latest filing text."
+    )
+    return {
+        "source": source,
+        "non_operating_evidence": non_operating_evidence,
+        "cost_reduction_evidence": cost_reduction_evidence,
+        "chart_rows": chart_rows,
+        "summary": summary,
+    }
+
+
 def build_reading_checklist() -> list[dict[str, str]]:
     return [
         {"title": "Item 7 - MD&A", "detail": "Is management blaming temporary factors every year? Are explanations specific or generic?"},
@@ -2461,6 +2601,7 @@ def analyze() -> Any:
         flags, risk, latest_cfo_ni, beneish, forensic_components = generate_flags(quality_rows, text_signals=text_signals)
         item7_excerpt = extract_section_excerpt(filing_text, "item 7", ["item 7a", "item 8"])
         item9a_excerpt = extract_section_excerpt(filing_text, "item 9a", ["item 9b", "item 10"])
+        filing_evidence = build_filing_evidence_snapshot(filing_text, filings)
         watchlist = build_watchlist_snapshot()
         peers = build_peer_snapshot(ticker)
         cfo_ni_trend = get_cfo_ni_trend_from_quality_rows(quality_rows)
@@ -2527,6 +2668,7 @@ def analyze() -> Any:
             "text_excerpts": text_excerpts,
             "item7_excerpt": item7_excerpt,
             "item9a_excerpt": item9a_excerpt,
+            "filing_evidence": filing_evidence,
             "decision_table": decision_table,
             "forensic_score": forensic_score,
             "forensic_components": forensic_components,
