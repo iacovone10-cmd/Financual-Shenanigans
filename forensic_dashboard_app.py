@@ -262,11 +262,11 @@ APP_HTML = r"""<!doctype html>
     </div>
 
     <div class="grid">
-      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
+      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>10-K access</h2><span class="muted">Fast navigation</span></div><div id="filingsBox" class="flags"></div></div>
 
       <div class="panel span-8"><div class="section-title"><h2>Price & trend</h2><span class="muted">Market view</span></div><div id="priceChart" style="height:360px;"></div></div>
-      <div class="panel span-4"><div class="section-title"><h2>Forensic summary</h2><span class="muted">Instant triage</span></div><div class="flags" id="flagsContainer"></div></div>
+      <div class="panel span-4"><div class="section-title"><h2>Forensic summary</h2><span class="muted">Instant triage</span></div><div class="flags" id="insightContainer"></div><div class="flags" id="flagsContainer"></div></div>
 
       <div class="panel span-6"><div class="section-title"><h2>Cash flow breakdown</h2><span class="muted">Operating cash quality</span></div><div style="overflow:auto;"><table><thead><tr><th>Period</th><th>CFO</th><th>CapEx</th><th>FCF</th><th>Acquisitions</th><th>CFO/NI</th></tr></thead><tbody id="cashflowBody"></tbody></table></div></div>
       <div class="panel span-3"><div class="section-title"><h2>Acquisition analysis</h2><span class="muted">Roll-up risk</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Comment</th></tr></thead><tbody id="acqBody"></tbody></table></div></div>
@@ -395,6 +395,22 @@ APP_HTML = r"""<!doctype html>
     el.innerHTML = flags.map(f => `<div class="flag ${f.severity.toLowerCase()}"><div class="t">${f.title}</div><div class="muted">${f.detail}</div></div>`).join('');
   }
 
+  function renderInsights(data) {
+    const el = document.getElementById('insightContainer');
+    if (!el) return;
+    const quality = data.earnings_quality_classification || '';
+    const cls = quality === 'HIGH QUALITY' ? 'ok' : (quality === 'MODERATE QUALITY' ? 'warn' : 'bad');
+    const topFlags = (data.red_flag_highlights || []).slice(0, 3);
+    const flagHtml = topFlags.map(f => `<div class="muted small">• ${f.title} (${f.severity}, ${f.persistence})</div>`).join('');
+    el.innerHTML = `
+      <div class="flag ${cls}">
+        <div class="t">${data.earnings_quality_classification || 'QUALITY N/A'}</div>
+        <div class="muted">${data.earnings_quality_explanation || data.forensic_summary || 'No explanation available.'}</div>
+        ${flagHtml}
+      </div>
+    `;
+  }
+
   function renderFilings(rows) {
     const el = document.getElementById('filingsBox');
     if (!el) return;
@@ -503,10 +519,10 @@ APP_HTML = r"""<!doctype html>
   function renderScreener(rows) {
     const body = document.getElementById('screenerBody');
     if (!body) return;
-    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.reason || '-'}</td></tr>`).join('');
+    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.short_reason || r.reason || '-'}</td></tr>`).join('');
     document.getElementById('screenCount').textContent = String(rows.length || 0);
     document.getElementById('screenWorst').textContent = rows.length ? numFmt(rows[0].score) : '-';
-    const text = rows.flatMap(r => (r.reason || '').split(',').map(x => x.trim())).filter(Boolean);
+    const text = rows.flatMap(r => (r.short_reason || r.reason || '').split(',').map(x => x.trim())).filter(Boolean);
     const freq = {};
     text.forEach(x => { freq[x] = (freq[x] || 0) + 1; });
     const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
@@ -629,8 +645,9 @@ APP_HTML = r"""<!doctype html>
       document.getElementById('cfoNiValue').textContent = numFmt(data.latest_cfo_ni);
       document.getElementById('beneishValue').textContent = data.beneish_m !== null ? numFmt(data.beneish_m) : '-';
       document.getElementById('flagsCount').textContent = String(data.flags.length);
-      setRiskBadge(data.risk_level, `Risk level: ${data.risk_level}`);
+      setRiskBadge(data.risk_level, `${data.earnings_quality_classification || 'N/A'} | Risk: ${data.risk_level}`);
       renderHeatmap(data);
+      renderInsights(data);
       renderFlags(data.flags || []);
       renderFilings(data.filings || []);
       renderWorkingCapital(data.working_capital_rows || []);
@@ -1662,6 +1679,224 @@ def compute_forensic_score(
     return score, "Avoid / High forensic attention", "High"
 
 
+def classify_earnings_quality(
+    forensic_score: float,
+    risk_level: str,
+    flags: list[dict[str, Any]],
+    components: dict[str, Any] | None = None,
+    text_signals: list[dict[str, Any]] | None = None,
+) -> str:
+    components = components or {}
+    high_severity_flags = sum(1 for f in flags if str(f.get("severity")) == "Bad")
+    persistent_events = int(safe_float(components.get("persistent_events")) or 0)
+    severe_text_signals = {"material weakness", "restatement"}
+    has_severe_text = any(str(s.get("signal", "")).lower() in severe_text_signals for s in (text_signals or []))
+
+    if forensic_score < 35 or high_severity_flags >= 3 or persistent_events >= 2 or has_severe_text:
+        return "HIGH RISK"
+    if forensic_score < 55 or risk_level == "High" or high_severity_flags >= 2:
+        return "LOW QUALITY"
+    if forensic_score < 75 or risk_level == "Medium":
+        return "MODERATE QUALITY"
+    return "HIGH QUALITY"
+
+
+def _component_signal_from_score(score: float) -> str:
+    if score >= 75:
+        return "LOW"
+    if score >= 45:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _map_severity_label(severity: str) -> str:
+    return "HIGH" if severity == "Bad" else "MEDIUM" if severity == "Warn" else "LOW"
+
+
+def _map_persistence_label(persistence: str) -> str:
+    normalized = persistence.lower()
+    if normalized == "one-off":
+        return "temporary"
+    return normalized if normalized in {"temporary", "repeated", "persistent"} else "temporary"
+
+
+def build_grouped_signals(
+    components: dict[str, Any],
+    text_signals: list[dict[str, Any]],
+    flags: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "earnings_quality": [],
+        "cash_flow_quality": [],
+        "working_capital_risk": [],
+        "non_operating_non_recurring_risk": [],
+        "narrative_risk": [],
+    }
+    for flag in flags:
+        title = str(flag.get("title", "")).lower()
+        signal = {"signal": flag.get("title"), "severity": _map_severity_label(str(flag.get("severity", "Warn"))), "detail": flag.get("detail")}
+        if "cash" in title or "accrual" in title or "cfo" in title:
+            grouped["cash_flow_quality"].append(signal)
+        if "revenue" in title or "earnings" in title or "beneish" in title:
+            grouped["earnings_quality"].append(signal)
+        if "receivable" in title or "working-capital" in title or "inventory" in title or "payables" in title or "dsri" in title:
+            grouped["working_capital_risk"].append(signal)
+        if "non-operating" in title or "one-time" in title or "gain" in title:
+            grouped["non_operating_non_recurring_risk"].append(signal)
+
+    mismatch = components.get("mismatch_classification")
+    if mismatch and mismatch != "none":
+        grouped["earnings_quality"].append(
+            {
+                "signal": "NI/CFO persistence pattern",
+                "severity": "HIGH" if mismatch == "persistent" else "MEDIUM",
+                "persistence": _map_persistence_label(str(mismatch)),
+                "detail": "Mismatch between net income and operating cash flow is recurring.",
+            }
+        )
+    for anomaly in components.get("working_capital_anomalies", []):
+        grouped["working_capital_risk"].append(
+            {
+                "signal": f"{str(anomaly.get('metric', 'working capital')).title()} anomaly",
+                "severity": "MEDIUM",
+                "detail": anomaly.get("why_it_matters"),
+            }
+        )
+    non_op = components.get("non_operating_analysis", {}) or {}
+    if non_op.get("penalty", 0) > 0:
+        grouped["non_operating_non_recurring_risk"].append(
+            {
+                "signal": "Earnings supported by non-core items",
+                "severity": "HIGH" if (safe_float(non_op.get("latest_support_ratio")) or 0) >= 0.2 else "MEDIUM",
+                "persistence": _map_persistence_label(str(non_op.get("persistence", "temporary"))),
+                "detail": "Reported profit appears supported by non-recurring or non-operating income.",
+            }
+        )
+    for sig in text_signals:
+        grouped["narrative_risk"].append(
+            {
+                "signal": sig.get("signal"),
+                "severity": "HIGH" if str(sig.get("signal", "")).lower() in {"material weakness", "restatement"} else "MEDIUM",
+                "hits": sig.get("hits"),
+                "detail": sig.get("interpretation"),
+            }
+        )
+    return grouped
+
+
+def build_forensic_breakdown(
+    quality_rows: list[dict[str, Any]],
+    components: dict[str, Any],
+    flags: list[dict[str, Any]],
+    text_signals: list[dict[str, Any]],
+    forensic_score: float,
+) -> dict[str, Any]:
+    latest = quality_rows[-1] if quality_rows else {}
+    latest_cfo_ni = safe_float(latest.get("cfo_ni"))
+    latest_beneish = safe_float(latest.get("beneish_m"))
+    dsri = safe_float(latest.get("dsri"))
+    mismatch = str(components.get("mismatch_classification", "none"))
+    non_op = components.get("non_operating_analysis", {}) or {}
+    non_op_ratio = safe_float(non_op.get("latest_support_ratio"))
+    mismatch_component_score = 85.0
+    if mismatch == "persistent":
+        mismatch_component_score = 30.0
+    elif mismatch == "repeated":
+        mismatch_component_score = 50.0
+    elif mismatch == "one-off":
+        mismatch_component_score = 65.0
+
+    revenue_score = 88.0 if "margin divergence" not in components.get("reason_tags", []) else 42.0
+    cashflow_score = 90.0 if (latest_cfo_ni is not None and latest_cfo_ni >= 1.0) else 65.0 if (latest_cfo_ni is not None and latest_cfo_ni >= 0.8) else 38.0
+    working_capital_score = 88.0 if not components.get("working_capital_anomalies") and (dsri is None or dsri <= 1.05) else 60.0 if (dsri is None or dsri <= 1.15) else 35.0
+    non_operating_score = 90.0 if non_op.get("penalty", 0) <= 0 else 62.0 if (non_op_ratio or 0) < 0.2 else 30.0
+    text_score = 90.0 if not text_signals else 60.0 if len(text_signals) <= 4 else 40.0
+    if latest_beneish is not None and latest_beneish > -1.78:
+        revenue_score = min(revenue_score, 32.0)
+        cashflow_score = min(cashflow_score, 35.0)
+
+    score_components = [
+        {"name": "revenue_quality", "score": revenue_score, "severity": _component_signal_from_score(revenue_score), "persistence": _map_persistence_label("repeated" if "margin divergence" in components.get("reason_tags", []) else "temporary")},
+        {"name": "cash_flow_quality", "score": cashflow_score, "severity": _component_signal_from_score(cashflow_score), "persistence": _map_persistence_label(mismatch if mismatch != "none" else "temporary")},
+        {"name": "working_capital", "score": working_capital_score, "severity": _component_signal_from_score(working_capital_score), "persistence": _map_persistence_label("repeated" if len(components.get("working_capital_anomalies", [])) >= 2 else "temporary")},
+        {"name": "non_operating_income", "score": non_operating_score, "severity": _component_signal_from_score(non_operating_score), "persistence": _map_persistence_label(str(non_op.get("persistence", "temporary")))},
+        {"name": "text_signals", "score": text_score, "severity": _component_signal_from_score(text_score), "persistence": _map_persistence_label("persistent" if len(text_signals) >= 6 else "repeated" if len(text_signals) >= 2 else "temporary")},
+        {"name": "ni_cfo_persistence", "score": mismatch_component_score, "severity": _component_signal_from_score(mismatch_component_score), "persistence": _map_persistence_label(mismatch if mismatch != "none" else "temporary")},
+    ]
+    component_summary = {
+        c["name"]: {"score": c["score"], "severity": c["severity"], "persistence": c["persistence"]}
+        for c in score_components
+    }
+    return {
+        "overall_score": forensic_score,
+        "score_components": score_components,
+        "component_summary": component_summary,
+        "persistent_event_count": int(safe_float(components.get("persistent_events")) or 0),
+    }
+
+
+def build_red_flag_highlights(flags: list[dict[str, Any]], components: dict[str, Any]) -> list[dict[str, Any]]:
+    weighted = []
+    for flag in flags:
+        sev = str(flag.get("severity", "Warn"))
+        score = 3 if sev == "Bad" else 2 if sev == "Warn" else 1
+        title = str(flag.get("title", ""))
+        persistence = "temporary"
+        if "Persistent" in title or "persistent" in title:
+            persistence = "persistent"
+            score += 2
+        elif "Repeated" in title or "repeated" in title:
+            persistence = "repeated"
+            score += 1
+        weighted.append(
+            {
+                "title": title,
+                "detail": flag.get("detail"),
+                "severity": _map_severity_label(sev),
+                "persistence": persistence,
+                "importance_score": score,
+            }
+        )
+    non_op = components.get("non_operating_analysis", {}) or {}
+    if non_op.get("penalty", 0) > 0:
+        weighted.append(
+            {
+                "title": "Non-operating earnings support",
+                "detail": "Part of net income appears to come from non-recurring or non-operating sources.",
+                "severity": "HIGH" if (safe_float(non_op.get("latest_support_ratio")) or 0) >= 0.2 else "MEDIUM",
+                "persistence": _map_persistence_label(str(non_op.get("persistence", "temporary"))),
+                "importance_score": 5 if str(non_op.get("persistence")) == "persistent" else 4,
+            }
+        )
+    weighted.sort(key=lambda x: (-x["importance_score"], x["title"]))
+    return weighted[:6]
+
+
+def build_quality_explanation(
+    quality_classification: str,
+    breakdown: dict[str, Any],
+    red_flags: list[dict[str, Any]],
+) -> str:
+    top = red_flags[:3]
+    if not top:
+        return f"{quality_classification}: reported earnings quality currently screens as stable with no major forensic red flags."
+    reasons = []
+    for item in top:
+        title = str(item.get("title", "")).lower()
+        if "revenue" in title:
+            reasons.append("revenue growth appears to diverge from margin quality")
+        elif "cash" in title or "cfo" in title:
+            reasons.append("operating cash flow does not fully support accounting earnings")
+        elif "working" in title or "receivable" in title or "inventory" in title or "dsri" in title:
+            reasons.append("working capital trends suggest weaker collections or cash absorption")
+        elif "non-operating" in title or "one-time" in title:
+            reasons.append("non-recurring or non-operating items may be supporting earnings")
+    if not reasons:
+        reasons = [str(item.get("title", "key forensic issue")).lower() for item in top]
+    concise_reasons = ", ".join(list(dict.fromkeys(reasons))[:3])
+    return f"{quality_classification}: {concise_reasons}."
+
+
 def build_decision_table(
     latest_metrics: dict[str, Any],
     flags: list[dict[str, str]],
@@ -1688,9 +1923,35 @@ def build_watchlist_snapshot() -> list[dict[str, Any]]:
             quality_rows, _, _, _, _ = build_quality_rows(ticker)
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
             score, verdict, _ = compute_forensic_score(cfo_ni, beneish, len(flags), components=components)
-            rows.append({"ticker": ticker, "score": score, "risk": risk, "verdict": verdict, "cfo_ni": cfo_ni, "beneish": beneish, "flag_count": len(flags)})
+            quality_classification = classify_earnings_quality(score, risk, flags, components=components, text_signals=[])
+            red_flag_highlights = build_red_flag_highlights(flags, components)
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "score": score,
+                    "risk": risk,
+                    "verdict": verdict,
+                    "cfo_ni": cfo_ni,
+                    "beneish": beneish,
+                    "flag_count": len(flags),
+                    "quality_classification": quality_classification,
+                    "red_flag_count": len(red_flag_highlights),
+                }
+            )
         except Exception:
-            rows.append({"ticker": ticker, "score": 0.0, "risk": "NA", "verdict": "NA", "cfo_ni": None, "beneish": None, "flag_count": 0})
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "score": 0.0,
+                    "risk": "NA",
+                    "verdict": "NA",
+                    "cfo_ni": None,
+                    "beneish": None,
+                    "flag_count": 0,
+                    "quality_classification": "HIGH RISK",
+                    "red_flag_count": 0,
+                }
+            )
     rows.sort(key=lambda x: (-x["score"], x["flag_count"]))
     for i, row in enumerate(rows, start=1):
         row["rank"] = i
@@ -1705,6 +1966,8 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
             score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
+            quality_classification = classify_earnings_quality(score, risk, flags, components=components, text_signals=[])
+            red_flag_highlights = build_red_flag_highlights(flags + cashflow_flags, components)
             dsri = safe_float(latest_metrics.get("dsri"))
             reasons = []
             if cfo_ni is not None and cfo_ni < 0.9:
@@ -1735,10 +1998,13 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "ticker": ticker,
                     "score": score,
                     "risk": risk,
+                    "quality_classification": quality_classification,
+                    "red_flag_count": len(red_flag_highlights),
                     "cfo_ni": cfo_ni,
                     "beneish": beneish,
                     "dsri": dsri,
                     "reason": ", ".join(list(dict.fromkeys(reasons))[:3]),
+                    "short_reason": ", ".join(list(dict.fromkeys(reasons))[:1]) if reasons else "no major anomaly cluster",
                     "distress_rank": distress_rank,
                 })
         except Exception:
@@ -1826,6 +2092,21 @@ def analyze() -> Any:
             components=forensic_components,
             text_signals=text_signals,
         )
+        earnings_quality_classification = classify_earnings_quality(
+            forensic_score,
+            risk,
+            flags,
+            components=forensic_components,
+            text_signals=text_signals,
+        )
+        forensic_breakdown = build_forensic_breakdown(
+            quality_rows,
+            forensic_components,
+            flags,
+            text_signals,
+            forensic_score,
+        )
+        grouped_signals = build_grouped_signals(forensic_components, text_signals, flags)
         acquisition_table = [
             {"metric": "Latest acquisitions cash", "value": fmt_value(abs(acq_metrics.get("latest_acquisitions")) if safe_float(acq_metrics.get("latest_acquisitions")) is not None else None), "comment": "Cash outflow for acquisitions. Displayed as absolute size for readability."},
             {"metric": "Average acquisitions (4 periods)", "value": fmt_value(abs(acq_metrics.get("avg_acquisitions")) if safe_float(acq_metrics.get("avg_acquisitions")) is not None else None), "comment": "Useful to spot serial acquirers and roll-up patterns."},
@@ -1833,6 +2114,8 @@ def analyze() -> Any:
             {"metric": "Latest free cash flow", "value": fmt_value(acq_metrics.get("latest_fcf")), "comment": "FCF = CFO - CapEx. Check whether strength remains after reinvestment."},
         ]
         cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
+        red_flag_highlights = build_red_flag_highlights(flags + cashflow_flags, forensic_components)
+        quality_explanation = build_quality_explanation(earnings_quality_classification, forensic_breakdown, red_flag_highlights)
         top_gainers, top_losers = get_top_gainers_losers()
         return jsonify({
             "ticker": ticker,
@@ -1866,6 +2149,11 @@ def analyze() -> Any:
             "forensic_score": forensic_score,
             "forensic_components": forensic_components,
             "forensic_summary": "; ".join(forensic_components.get("major_reasons", [])[:3]) if forensic_components.get("major_reasons") else "No additional persistent forensic anomalies detected.",
+            "forensic_breakdown": forensic_breakdown,
+            "earnings_quality_classification": earnings_quality_classification,
+            "earnings_quality_explanation": quality_explanation,
+            "red_flag_highlights": red_flag_highlights,
+            "grouped_signals": grouped_signals,
             "new_signals_added": [
                 "Revenue growth vs net-margin deterioration",
                 "Revenue growth vs CFO-margin deterioration",
