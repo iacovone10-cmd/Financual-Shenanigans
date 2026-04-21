@@ -305,6 +305,12 @@ APP_HTML = r"""<!doctype html>
       <div class="panel span-8"><div class="section-title"><h2>Non-operating & cost reduction evidence</h2><span class="muted">10-K / 10-Q text-based picture</span></div><div id="evidencePictureChart" style="height:320px;"></div></div>
       <div class="panel span-4"><div class="section-title"><h2>Filing evidence snippets</h2><span class="muted">Primary-text extracts</span></div><div id="evidenceWall" class="evidence-wall"></div></div>
 
+      <div class="panel span-6"><div class="section-title"><h2>Revenue by region table</h2><span class="muted">SEC disclosure extraction</span></div><div style="overflow:auto;"><table><thead><tr><th>Year</th><th>Region</th><th>Revenue</th><th>Mix</th><th>YoY</th></tr></thead><tbody id="geoRevenueBody"></tbody></table></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Segment revenue table</h2><span class="muted">Business segment disclosure</span></div><div style="overflow:auto;"><table><thead><tr><th>Year</th><th>Segment</th><th>Revenue</th><th>Mix</th><th>YoY</th></tr></thead><tbody id="segmentRevenueBody"></tbody></table></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Revenue by region trend</h2><span class="muted">Multi-year geographic trend</span></div><div id="geoTrendChart" style="height:320px;"></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Geographic / segment mix</h2><span class="muted">Concentration view</span></div><div id="geoMixChart" style="height:320px;"></div><div id="segmentMixChart" style="height:320px; margin-top:12px;"></div></div>
+      <div class="panel span-12"><div class="section-title"><h2>Geographic and segment interpretation</h2><span class="muted">Forensic narrative layer</span></div><div class="flags" id="geoSegmentSummaryBox"></div></div>
+
       <div class="panel span-6"><div class="section-title"><h2>10-K excerpts</h2><span class="muted">Keyword context</span></div><div class="flags" id="excerptBox"></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Decision engine</h2><span class="muted">Hedge Fund mode</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Meaning</th></tr></thead><tbody id="decisionBody"></tbody></table></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Peer comparison</h2><span class="muted">Automatic sector-style peers</span></div><div style="overflow:auto;"><table><thead><tr><th>Ticker</th><th>Price</th><th>Market cap</th><th>CFO/NI</th><th>Beneish</th><th>Flags</th></tr></thead><tbody id="peersBody"></tbody></table></div></div>
@@ -574,6 +580,95 @@ APP_HTML = r"""<!doctype html>
     document.getElementById('watchlistBody').innerHTML = rows.map(r => `<tr><td>${r.rank}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.risk}</td><td>${r.verdict}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${r.flag_count}</td></tr>`).join('');
   }
 
+  function renderGeoRevenue(rows) {
+    const el = document.getElementById('geoRevenueBody');
+    if (!el) return;
+    if (!rows || !rows.length) {
+      el.innerHTML = '<tr><td colspan="5" class="muted">Geographic revenue disclosure not available for this filing.</td></tr>';
+      return;
+    }
+    el.innerHTML = rows.map(r => `<tr><td>${r.year || '-'}</td><td>${r.region || '-'}</td><td>${moneyFmt(r.revenue)}</td><td>${pctFmt(r.share_of_total)}</td><td class="${(r.yoy_growth ?? 0) >= 0 ? 'pos' : 'neg'}">${pctFmt(r.yoy_growth)}</td></tr>`).join('');
+  }
+
+  function renderSegmentRevenue(rows) {
+    const el = document.getElementById('segmentRevenueBody');
+    if (!el) return;
+    if (!rows || !rows.length) {
+      el.innerHTML = '<tr><td colspan="5" class="muted">Segment revenue disclosure not available for this filing.</td></tr>';
+      return;
+    }
+    el.innerHTML = rows.map(r => `<tr><td>${r.year || '-'}</td><td>${r.segment || '-'}</td><td>${moneyFmt(r.revenue)}</td><td>${pctFmt(r.share_of_total)}</td><td class="${(r.yoy_growth ?? 0) >= 0 ? 'pos' : 'neg'}">${pctFmt(r.yoy_growth)}</td></tr>`).join('');
+  }
+
+  function renderGeoTrendChart(rows) {
+    const host = document.getElementById('geoTrendChart');
+    if (!host) return;
+    if (!rows || !rows.length) {
+      host.innerHTML = '<div class="muted">Geographic revenue disclosure not available for this filing.</div>';
+      return;
+    }
+    const byRegion = {};
+    rows.forEach(r => {
+      if (!r.region || !r.year || r.revenue === null || r.revenue === undefined) return;
+      if (!byRegion[r.region]) byRegion[r.region] = [];
+      byRegion[r.region].push(r);
+    });
+    const traces = Object.keys(byRegion).slice(0, 8).map(region => {
+      const sorted = byRegion[region].sort((a,b) => String(a.year).localeCompare(String(b.year)));
+      return { x: sorted.map(x => x.year), y: sorted.map(x => x.revenue), type: 'scatter', mode: 'lines+markers', name: region };
+    });
+    if (!traces.length) {
+      host.innerHTML = '<div class="muted">Geographic revenue disclosure not available for this filing.</div>';
+      return;
+    }
+    const layout = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', margin: { l: 40, r: 10, t: 10, b: 40 }, font: { color: '#edf2ff' }, xaxis: { gridcolor: 'rgba(255,255,255,0.06)' }, yaxis: { gridcolor: 'rgba(255,255,255,0.06)' } };
+    Plotly.newPlot('geoTrendChart', traces, layout, { responsive: true, displayModeBar: false });
+  }
+
+  function renderMixCharts(geoMixRows, segmentMixRows) {
+    const geoHost = document.getElementById('geoMixChart');
+    const segHost = document.getElementById('segmentMixChart');
+    if (geoHost) {
+      if (geoMixRows && geoMixRows.length) {
+        const latestYear = geoMixRows.map(r => r.year).sort().slice(-1)[0];
+        const latestRows = geoMixRows.filter(r => r.year === latestYear);
+        const trace = { labels: latestRows.map(r => r.region), values: latestRows.map(r => (r.share_of_total || 0) * 100), type: 'pie', hole: 0.45 };
+        Plotly.newPlot('geoMixChart', [trace], { paper_bgcolor: 'rgba(0,0,0,0)', font: { color: '#edf2ff' }, margin: { l: 10, r: 10, t: 20, b: 10 }, title: `Geographic mix (${latestYear})` }, { responsive: true, displayModeBar: false });
+      } else {
+        geoHost.innerHTML = '<div class="muted">Geographic mix not available.</div>';
+      }
+    }
+    if (segHost) {
+      if (segmentMixRows && segmentMixRows.length) {
+        const latestYear = segmentMixRows.map(r => r.year).sort().slice(-1)[0];
+        const latestRows = segmentMixRows.filter(r => r.year === latestYear);
+        const trace = { labels: latestRows.map(r => r.segment), values: latestRows.map(r => (r.share_of_total || 0) * 100), type: 'pie', hole: 0.45 };
+        Plotly.newPlot('segmentMixChart', [trace], { paper_bgcolor: 'rgba(0,0,0,0)', font: { color: '#edf2ff' }, margin: { l: 10, r: 10, t: 20, b: 10 }, title: `Segment mix (${latestYear})` }, { responsive: true, displayModeBar: false });
+      } else {
+        segHost.innerHTML = '<div class="muted">Segment mix not available.</div>';
+      }
+    }
+  }
+
+  function renderGeoSegmentSummary(data) {
+    const el = document.getElementById('geoSegmentSummaryBox');
+    if (!el) return;
+    const items = [];
+    if (data.geographic_summary && data.geographic_summary.summary) {
+      items.push({ title: 'Geographic summary', detail: data.geographic_summary.summary, severity: data.geographic_summary.severity || 'Warn' });
+    } else {
+      items.push({ title: 'Geographic disclosure gap', detail: 'Geographic revenue disclosure not available for this filing.', severity: 'Warn' });
+    }
+    if (data.segment_summary && data.segment_summary.summary) {
+      items.push({ title: 'Segment summary', detail: data.segment_summary.summary, severity: data.segment_summary.severity || 'Warn' });
+    } else {
+      items.push({ title: 'Segment disclosure gap', detail: 'Segment revenue disclosure not available for this filing.', severity: 'Warn' });
+    }
+    (data.geographic_summary?.warnings || []).forEach(w => items.push({ title: 'Geographic warning', detail: w, severity: 'Warn' }));
+    (data.segment_summary?.warnings || []).forEach(w => items.push({ title: 'Segment warning', detail: w, severity: 'Warn' }));
+    el.innerHTML = items.map(x => `<div class="flag ${String(x.severity || 'Warn').toLowerCase()}"><div class="t">${x.title}</div><div class="muted">${x.detail}</div></div>`).join('');
+  }
+
   function renderPeers(rows) {
     document.getElementById('peersBody').innerHTML = rows.map(r => `<tr><td>${r.ticker}</td><td>${moneyFmt(r.price)}</td><td>${moneyFmt(r.market_cap)}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${r.flag_count ?? '-'}</td></tr>`).join('');
   }
@@ -740,6 +835,11 @@ APP_HTML = r"""<!doctype html>
       renderSingleExcerpt('item9aBox', 'Item 9A', data.item9a_excerpt);
       renderEvidencePicture(data.filing_evidence || null);
       renderEvidenceBoard(data.filing_evidence || null);
+      renderGeoRevenue(data.geographic_revenue_rows || []);
+      renderSegmentRevenue(data.segment_revenue_rows || []);
+      renderGeoTrendChart(data.geographic_revenue_rows || []);
+      renderMixCharts(data.geographic_mix_rows || [], data.segment_mix_rows || []);
+      renderGeoSegmentSummary(data);
       renderDecision(data.decision_table || []);
       renderWatchlist(data.watchlist || []);
       renderPeers(data.peers || []);
@@ -1723,6 +1823,179 @@ def fetch_latest_10k_text(ticker: str) -> str:
         return ""
 
 
+def fetch_latest_annual_filing_table_frames(ticker: str, max_filings: int = 3) -> tuple[list[pd.DataFrame], list[dict[str, str]]]:
+    filings = get_sec_recent_filings(ticker, max_items=max_filings + 3)
+    annuals = [f for f in filings if f.get("form") in {"10-K", "20-F"}][:max_filings]
+    frames: list[pd.DataFrame] = []
+    used_sources: list[dict[str, str]] = []
+    for filing in annuals:
+        try:
+            tables = pd.read_html(filing["url"])
+            for t in tables:
+                if not t.empty and t.shape[0] >= 2 and t.shape[1] >= 2:
+                    frames.append(t)
+            used_sources.append(filing)
+        except Exception:
+            continue
+    return frames, used_sources
+
+
+def _normalize_bucket_label(raw: str) -> str:
+    txt = str(raw or "").strip()
+    low = txt.lower()
+    region_map = [
+        (r"(united states|u\.s\.|us|north america)", "United States / North America"),
+        (r"(emea|europe|middle east|africa)", "EMEA / Europe"),
+        (r"(apac|asia pacific|asia)", "APAC / Asia Pacific"),
+        (r"(latin america|latam|south america)", "Latin America"),
+        (r"(china)", "China"),
+        (r"(japan)", "Japan"),
+        (r"(other|rest of world|international)", "Other / International"),
+    ]
+    for pattern, normalized in region_map:
+        if re.search(pattern, low):
+            return normalized
+    return txt[:80]
+
+
+def _extract_year_tokens(cols: list[str]) -> list[tuple[int, int]]:
+    year_pos: list[tuple[int, int]] = []
+    for idx, c in enumerate(cols):
+        m = re.search(r"(20\d{2})", str(c))
+        if m:
+            year_pos.append((idx, int(m.group(1))))
+    return year_pos
+
+
+def _parse_numeric(v: Any) -> float | None:
+    if v is None:
+        return None
+    txt = str(v).strip()
+    if not txt:
+        return None
+    neg = "(" in txt and ")" in txt
+    cleaned = re.sub(r"[^0-9.\-]", "", txt.replace(",", ""))
+    if cleaned in {"", "-", ".", "-."}:
+        return None
+    try:
+        val = float(cleaned)
+        return -abs(val) if neg else val
+    except Exception:
+        return None
+
+
+def _table_kind_for_geo_segment(cols: list[str], first_col_samples: list[str]) -> str | None:
+    low_cols = " ".join(str(c).lower() for c in cols)
+    low_rows = " ".join(str(x).lower() for x in first_col_samples[:25])
+    hay = low_cols + " " + low_rows
+    geo_signals = ["geographic", "by geography", "by region", "international", "north america", "emea", "apac"]
+    seg_signals = ["segment", "business unit", "operating segment", "by segment", "product line"]
+    if any(s in hay for s in geo_signals):
+        return "geography"
+    if any(s in hay for s in seg_signals):
+        return "segment"
+    return None
+
+
+def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
+    frames, sources = fetch_latest_annual_filing_table_frames(ticker)
+    geo_raw: dict[tuple[int, str], float] = {}
+    seg_raw: dict[tuple[int, str], float] = {}
+    warnings: list[str] = []
+    for frame in frames:
+        try:
+            df = frame.copy()
+            df.columns = [str(c).strip() for c in df.columns]
+            year_pos = _extract_year_tokens(list(df.columns))
+            if len(year_pos) < 2:
+                continue
+            first_col = str(df.columns[0])
+            sample_labels = [str(x) for x in df[first_col].head(30).tolist()]
+            kind = _table_kind_for_geo_segment(list(df.columns), sample_labels)
+            if kind is None:
+                continue
+            for _, row in df.iterrows():
+                raw_label = str(row.iloc[0]).strip()
+                if len(raw_label) < 2:
+                    continue
+                low_label = raw_label.lower()
+                if any(skip in low_label for skip in ["total", "elimination", "consolidated", "intersegment"]):
+                    continue
+                bucket = _normalize_bucket_label(raw_label) if kind == "geography" else raw_label[:80]
+                for pos, year in year_pos:
+                    value = _parse_numeric(row.iloc[pos] if pos < len(row) else None)
+                    if value is None or value <= 0:
+                        continue
+                    key = (year, bucket)
+                    if kind == "geography":
+                        geo_raw[key] = max(geo_raw.get(key, 0.0), value)
+                    else:
+                        seg_raw[key] = max(seg_raw.get(key, 0.0), value)
+        except Exception:
+            continue
+
+    def build_rows(raw_map: dict[tuple[int, str], float], label_key: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        if not raw_map:
+            return [], [], {"summary": "", "warnings": [f"{label_key.title()} revenue disclosure not available for this filing"], "severity": "Warn"}
+        rows = [{"year": y, label_key: bucket, "revenue": val} for (y, bucket), val in raw_map.items()]
+        rows.sort(key=lambda x: (x["year"], str(x[label_key])))
+        totals: dict[int, float] = {}
+        for r in rows:
+            totals[r["year"]] = totals.get(r["year"], 0.0) + float(r["revenue"])
+        yoy_lookup: dict[tuple[int, str], float | None] = {}
+        for r in rows:
+            y = r["year"]
+            prev = next((z for z in sorted(totals.keys()) if z < y), None)
+            prev_val = raw_map.get((prev, r[label_key])) if prev is not None else None
+            yoy_lookup[(y, r[label_key])] = ((r["revenue"] / prev_val) - 1.0) if prev_val not in (None, 0) else None
+        full_rows = []
+        mix_rows = []
+        years = sorted(totals.keys())
+        for r in rows:
+            share = (r["revenue"] / totals[r["year"]]) if totals.get(r["year"]) else None
+            enriched = {**r, "share_of_total": share, "yoy_growth": yoy_lookup.get((r["year"], r[label_key]))}
+            full_rows.append(enriched)
+            mix_rows.append({"year": r["year"], label_key: r[label_key], "share_of_total": share, "revenue": r["revenue"]})
+        latest_year = years[-1]
+        latest_rows = [r for r in full_rows if r["year"] == latest_year and r.get("share_of_total") is not None]
+        dominant = max(latest_rows, key=lambda x: x["share_of_total"]) if latest_rows else None
+        dominance = dominant.get("share_of_total") if dominant else None
+        sev = "Warn" if dominance is not None and dominance >= 0.5 else "Ok"
+        if dominance is not None and dominance >= 0.6:
+            sev = "Bad"
+        summary = (
+            f"Latest {label_key} concentration: {dominant[label_key]} at {dominance * 100:.1f}% of disclosed revenue."
+            if dominant and dominance is not None
+            else f"{label_key.title()} disclosure parsed with {len(full_rows)} rows."
+        )
+        local_warnings: list[str] = []
+        if len(years) < 2:
+            local_warnings.append(f"Only one disclosed year was available for {label_key} analysis")
+        if dominance is not None and dominance >= 0.6:
+            local_warnings.append(f"Concentration risk is high: {dominant[label_key]} exceeds 60% of disclosed revenue")
+        elif dominance is not None and dominance >= 0.5:
+            local_warnings.append(f"Concentration risk watch: {dominant[label_key]} exceeds 50% of disclosed revenue")
+        negative_yoy = [r for r in full_rows if r.get("yoy_growth") is not None and r["yoy_growth"] < -0.05]
+        if negative_yoy:
+            local_warnings.append("At least one disclosed bucket shows material YoY deterioration")
+        return full_rows, mix_rows, {"summary": summary, "warnings": local_warnings, "severity": sev, "dominant_bucket": dominant[label_key] if dominant else None}
+
+    geo_rows, geo_mix, geo_summary = build_rows(geo_raw, "region")
+    seg_rows, seg_mix, seg_summary = build_rows(seg_raw, "segment")
+    if not sources:
+        warnings.append("No annual filing tables were parsed from recent 10-K/20-F links")
+    return {
+        "geographic_revenue_rows": geo_rows,
+        "geographic_mix_rows": geo_mix,
+        "geographic_summary": geo_summary,
+        "segment_revenue_rows": seg_rows,
+        "segment_mix_rows": seg_mix,
+        "segment_summary": seg_summary,
+        "disclosure_warnings": warnings,
+        "sources": sources,
+    }
+
+
 def extract_section_excerpt(text: str, section_label: str, next_candidates: list[str], max_len: int = 700) -> str:
     if not text:
         return ""
@@ -2598,6 +2871,7 @@ def analyze() -> Any:
         reading_checklist = build_reading_checklist()
         filing_text = fetch_latest_10k_text(ticker)
         text_signals, text_excerpts = analyze_filing_text(filing_text)
+        geo_segment = extract_geographic_and_segment_disclosures(ticker)
         flags, risk, latest_cfo_ni, beneish, forensic_components = generate_flags(quality_rows, text_signals=text_signals)
         item7_excerpt = extract_section_excerpt(filing_text, "item 7", ["item 7a", "item 8"])
         item9a_excerpt = extract_section_excerpt(filing_text, "item 9a", ["item 9b", "item 10"])
@@ -2607,6 +2881,32 @@ def analyze() -> Any:
         cfo_ni_trend = get_cfo_ni_trend_from_quality_rows(quality_rows)
         dsri_fcf_trend = get_dsri_fcf_trend(quality_rows, cashflow_rows)
         trend_signals = build_trend_signals(cfo_ni_trend, dsri_fcf_trend)
+        geo_rows = geo_segment.get("geographic_revenue_rows", []) or []
+        seg_rows = geo_segment.get("segment_revenue_rows", []) or []
+        if geo_rows and quality_rows:
+            latest_company_growth = safe_float(quality_rows[-1].get("revenue_growth"))
+            latest_geo_year = max((r.get("year") for r in geo_rows if r.get("year") is not None), default=None)
+            dominant_geo = None
+            if latest_geo_year is not None:
+                latest_geo_rows = [r for r in geo_rows if r.get("year") == latest_geo_year]
+                if latest_geo_rows:
+                    dominant_geo = max(latest_geo_rows, key=lambda x: safe_float(x.get("share_of_total")) or -1)
+            dom_yoy = safe_float(dominant_geo.get("yoy_growth")) if dominant_geo else None
+            if latest_company_growth is not None and dom_yoy is not None and latest_company_growth > 0.05 and dom_yoy < 0:
+                geo_segment["geographic_summary"]["warnings"].append(
+                    "Company-level growth is positive while the dominant region is shrinking; investigate narrative mismatch."
+                )
+                geo_segment["geographic_summary"]["severity"] = "Warn"
+        if seg_rows:
+            latest_seg_year = max((r.get("year") for r in seg_rows if r.get("year") is not None), default=None)
+            if latest_seg_year is not None:
+                latest_seg_rows = [r for r in seg_rows if r.get("year") == latest_seg_year]
+                dominant_seg = max(latest_seg_rows, key=lambda x: safe_float(x.get("share_of_total")) or -1) if latest_seg_rows else None
+                if dominant_seg and (safe_float(dominant_seg.get("share_of_total")) or 0) >= 0.6:
+                    geo_segment["segment_summary"]["warnings"].append(
+                        f"Segment concentration is high in {dominant_seg.get('segment')} (>60% of disclosed segment revenue)."
+                    )
+                    geo_segment["segment_summary"]["severity"] = "Bad"
         decision_table = build_decision_table(latest_metrics, flags, risk, info["long_name"], components=forensic_components)
         forensic_score, _, _ = compute_forensic_score(
             latest_cfo_ni,
@@ -2669,6 +2969,12 @@ def analyze() -> Any:
             "item7_excerpt": item7_excerpt,
             "item9a_excerpt": item9a_excerpt,
             "filing_evidence": filing_evidence,
+            "geographic_revenue_rows": geo_segment.get("geographic_revenue_rows", []),
+            "geographic_mix_rows": geo_segment.get("geographic_mix_rows", []),
+            "geographic_summary": geo_segment.get("geographic_summary", {}),
+            "segment_revenue_rows": geo_segment.get("segment_revenue_rows", []),
+            "segment_mix_rows": geo_segment.get("segment_mix_rows", []),
+            "segment_summary": geo_segment.get("segment_summary", {}),
             "decision_table": decision_table,
             "forensic_score": forensic_score,
             "forensic_components": forensic_components,
