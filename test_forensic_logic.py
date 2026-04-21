@@ -182,9 +182,9 @@ class ForensicLogicTests(unittest.TestCase):
         rows = payload["geographic_revenue_rows"]
         self.assertGreaterEqual(len(rows), 8)
         self.assertTrue(any(r["region"] == "UCAN" for r in rows))
-        self.assertTrue(any(r["region"] == "EMEA / Europe" for r in rows))
-        self.assertTrue(any(r["region"] == "Latin America / LATAM" for r in rows))
-        self.assertTrue(any(r["region"] == "APAC / Asia Pacific" for r in rows))
+        self.assertTrue(any(r["region"] == "EMEA" for r in rows))
+        self.assertTrue(any(r["region"] == "LATAM" for r in rows))
+        self.assertTrue(any(r["region"] == "APAC" for r in rows))
 
     def test_heading_neighborhood_fallback_extracts_regions(self):
         html = """

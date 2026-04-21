@@ -194,6 +194,16 @@ APP_HTML = r"""<!doctype html>
     .evidence-title { font-weight: 800; margin-bottom: 6px; }
     .evidence-copy { color: var(--muted); font-size: 13px; line-height: 1.4; }
     .evidence-source { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .geo-cards { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:10px; }
+    .geo-card { border:1px solid var(--border); border-radius:16px; padding:12px; background:rgba(255,255,255,0.03); }
+    .geo-kicker { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:8px; }
+    .geo-value { font-size:20px; font-weight:900; letter-spacing:-.02em; }
+    .geo-note { color:var(--muted); font-size:12px; margin-top:6px; line-height:1.3; }
+    .geo-diagnostic { border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.10); border-radius:16px; padding:12px; margin-top:10px; }
+    .geo-diagnostic h3 { margin:0 0 8px; font-size:16px; }
+    .geo-diagnostic ul { margin:0; padding-left:18px; color:var(--muted); }
+    .geo-interp { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+    .geo-interp .flag { padding:12px 13px; border-radius:14px; }
     @media (max-width: 1380px) {
       .topbar { grid-template-columns: 1fr 1fr 1fr; }
       .hero { grid-template-columns: 1fr; }
@@ -201,6 +211,8 @@ APP_HTML = r"""<!doctype html>
       .heat-grid { grid-template-columns: repeat(3, 1fr); }
       .hero-screener { grid-template-columns: 1fr; }
       .evidence-wall { grid-template-columns: 1fr; }
+      .geo-cards { grid-template-columns: repeat(2,1fr); }
+      .geo-interp { grid-template-columns: 1fr; }
       .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
     }
     @media (max-width: 720px) {
@@ -305,11 +317,18 @@ APP_HTML = r"""<!doctype html>
       <div class="panel span-8"><div class="section-title"><h2>Non-operating & cost reduction evidence</h2><span class="muted">10-K / 10-Q text-based picture</span></div><div id="evidencePictureChart" style="height:320px;"></div></div>
       <div class="panel span-4"><div class="section-title"><h2>Filing evidence snippets</h2><span class="muted">Primary-text extracts</span></div><div id="evidenceWall" class="evidence-wall"></div></div>
 
+      <div class="panel span-12">
+        <div class="section-title"><h2>Geographic & segment intelligence</h2><span class="muted">Table-first SEC extraction + forensic interpretation</span></div>
+        <div id="geoSummaryCards" class="geo-cards"></div>
+        <div id="geoDiagnosticPanel"></div>
+      </div>
+      <div class="panel span-6"><div class="section-title"><h2>Revenue by region trend</h2><span class="muted">Multi-year regional revenue</span></div><div id="geoTrendChart" style="height:320px;"></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Regional mix evolution</h2><span class="muted">Stacked concentration profile</span></div><div id="geoMixChart" style="height:320px;"></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Current-period mix donuts</h2><span class="muted">Geography and segments</span></div><div id="geoDonutChart" style="height:280px;"></div><div id="segmentMixChart" style="height:280px; margin-top:12px;"></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Segment revenue trend</h2><span class="muted">Business line trajectory</span></div><div id="segmentTrendChart" style="height:320px;"></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Revenue by region table</h2><span class="muted">SEC disclosure extraction</span></div><div style="overflow:auto;"><table><thead><tr><th>Year</th><th>Region</th><th>Revenue</th><th>Mix</th><th>YoY</th></tr></thead><tbody id="geoRevenueBody"></tbody></table></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Segment revenue table</h2><span class="muted">Business segment disclosure</span></div><div style="overflow:auto;"><table><thead><tr><th>Year</th><th>Segment</th><th>Revenue</th><th>Mix</th><th>YoY</th></tr></thead><tbody id="segmentRevenueBody"></tbody></table></div></div>
-      <div class="panel span-6"><div class="section-title"><h2>Revenue by region trend</h2><span class="muted">Multi-year geographic trend</span></div><div id="geoTrendChart" style="height:320px;"></div></div>
-      <div class="panel span-6"><div class="section-title"><h2>Geographic / segment mix</h2><span class="muted">Concentration view</span></div><div id="geoMixChart" style="height:320px;"></div><div id="segmentMixChart" style="height:320px; margin-top:12px;"></div></div>
-      <div class="panel span-12"><div class="section-title"><h2>Geographic and segment interpretation</h2><span class="muted">Forensic narrative layer</span></div><div class="flags" id="geoSegmentSummaryBox"></div></div>
+      <div class="panel span-12"><div class="section-title"><h2>Geographic and segment interpretation</h2><span class="muted">Dominance, growth leadership, concentration, mismatch checks</span></div><div class="geo-interp" id="geoSegmentSummaryBox"></div></div>
 
       <div class="panel span-6"><div class="section-title"><h2>10-K excerpts</h2><span class="muted">Keyword context</span></div><div class="flags" id="excerptBox"></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Decision engine</h2><span class="muted">Hedge Fund mode</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Meaning</th></tr></thead><tbody id="decisionBody"></tbody></table></div></div>
@@ -625,17 +644,54 @@ APP_HTML = r"""<!doctype html>
     Plotly.newPlot('geoTrendChart', traces, layout, { responsive: true, displayModeBar: false });
   }
 
+  function renderSegmentTrendChart(rows) {
+    const host = document.getElementById('segmentTrendChart');
+    if (!host) return;
+    if (!rows || !rows.length) {
+      host.innerHTML = '<div class="muted">Segment revenue disclosure not available for this filing.</div>';
+      return;
+    }
+    const bySegment = {};
+    rows.forEach(r => {
+      if (!r.segment || !r.year || r.revenue === null || r.revenue === undefined) return;
+      if (!bySegment[r.segment]) bySegment[r.segment] = [];
+      bySegment[r.segment].push(r);
+    });
+    const traces = Object.keys(bySegment).slice(0, 8).map(segment => {
+      const sorted = bySegment[segment].sort((a,b) => String(a.year).localeCompare(String(b.year)));
+      return { x: sorted.map(x => x.year), y: sorted.map(x => x.revenue), type: 'scatter', mode: 'lines+markers', name: segment };
+    });
+    if (!traces.length) {
+      host.innerHTML = '<div class="muted">Segment revenue disclosure not available for this filing.</div>';
+      return;
+    }
+    Plotly.newPlot('segmentTrendChart', traces, { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', margin: { l: 40, r: 10, t: 10, b: 40 }, font: { color: '#edf2ff' }, xaxis: { gridcolor: 'rgba(255,255,255,0.06)' }, yaxis: { gridcolor: 'rgba(255,255,255,0.06)' } }, { responsive: true, displayModeBar: false });
+  }
+
   function renderMixCharts(geoMixRows, segmentMixRows) {
     const geoHost = document.getElementById('geoMixChart');
+    const geoDonutHost = document.getElementById('geoDonutChart');
     const segHost = document.getElementById('segmentMixChart');
     if (geoHost) {
       if (geoMixRows && geoMixRows.length) {
-        const latestYear = geoMixRows.map(r => r.year).sort().slice(-1)[0];
-        const latestRows = geoMixRows.filter(r => r.year === latestYear);
-        const trace = { labels: latestRows.map(r => r.region), values: latestRows.map(r => (r.share_of_total || 0) * 100), type: 'pie', hole: 0.45 };
-        Plotly.newPlot('geoMixChart', [trace], { paper_bgcolor: 'rgba(0,0,0,0)', font: { color: '#edf2ff' }, margin: { l: 10, r: 10, t: 20, b: 10 }, title: `Geographic mix (${latestYear})` }, { responsive: true, displayModeBar: false });
+        const years = [...new Set(geoMixRows.map(r => r.year))].sort();
+        const regions = [...new Set(geoMixRows.map(r => r.region))].slice(0, 8);
+        const traces = regions.map(region => ({
+          x: years,
+          y: years.map(y => ((geoMixRows.find(r => r.year === y && r.region === region)?.share_of_total || 0) * 100)),
+          type: 'bar',
+          name: region
+        }));
+        Plotly.newPlot('geoMixChart', traces, { barmode: 'stack', paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: '#edf2ff' }, margin: { l: 35, r: 10, t: 10, b: 35 }, yaxis: { title: 'Mix %', gridcolor: 'rgba(255,255,255,0.06)' }, xaxis: { gridcolor: 'rgba(255,255,255,0.06)' } }, { responsive: true, displayModeBar: false });
+        if (geoDonutHost) {
+          const latestYear = years[years.length - 1];
+          const latestRows = geoMixRows.filter(r => r.year === latestYear);
+          const trace = { labels: latestRows.map(r => r.region), values: latestRows.map(r => (r.share_of_total || 0) * 100), type: 'pie', hole: 0.5 };
+          Plotly.newPlot('geoDonutChart', [trace], { paper_bgcolor: 'rgba(0,0,0,0)', font: { color: '#edf2ff' }, margin: { l: 10, r: 10, t: 20, b: 10 }, title: `Geographic mix (${latestYear})` }, { responsive: true, displayModeBar: false });
+        }
       } else {
         geoHost.innerHTML = '<div class="muted">Geographic mix not available.</div>';
+        if (geoDonutHost) geoDonutHost.innerHTML = '<div class="muted">Geographic mix not available.</div>';
       }
     }
     if (segHost) {
@@ -666,7 +722,54 @@ APP_HTML = r"""<!doctype html>
     }
     (data.geographic_summary?.warnings || []).forEach(w => items.push({ title: 'Geographic warning', detail: w, severity: 'Warn' }));
     (data.segment_summary?.warnings || []).forEach(w => items.push({ title: 'Segment warning', detail: w, severity: 'Warn' }));
+    const forensic = data.geo_segment_forensic || {};
+    (forensic.signals || []).forEach(s => items.push({ title: s.title || 'Forensic signal', detail: s.detail || '', severity: s.severity || 'Warn' }));
     el.innerHTML = items.map(x => `<div class="flag ${String(x.severity || 'Warn').toLowerCase()}"><div class="t">${x.title}</div><div class="muted">${x.detail}</div></div>`).join('');
+  }
+
+  function renderGeoSummaryCards(data) {
+    const el = document.getElementById('geoSummaryCards');
+    if (!el) return;
+    const geoRows = data.geographic_revenue_rows || [];
+    const segRows = data.segment_revenue_rows || [];
+    const latestGeoYear = geoRows.map(r => r.year).sort().slice(-1)[0];
+    const latestSegYear = segRows.map(r => r.year).sort().slice(-1)[0];
+    const latestGeoRows = geoRows.filter(r => r.year === latestGeoYear);
+    const latestSegRows = segRows.filter(r => r.year === latestSegYear);
+    const domGeo = latestGeoRows.sort((a,b) => (b.share_of_total || 0) - (a.share_of_total || 0))[0];
+    const domSeg = latestSegRows.sort((a,b) => (b.share_of_total || 0) - (a.share_of_total || 0))[0];
+    const growthLeader = geoRows.filter(r => r.year === latestGeoYear && r.yoy_growth !== null && r.yoy_growth !== undefined).sort((a,b) => (b.yoy_growth || -999) - (a.yoy_growth || -999))[0];
+    const extractionMethod = data.extraction_method_used || 'not_available';
+    el.innerHTML = `
+      <div class="geo-card"><div class="geo-kicker">Dominant region</div><div class="geo-value">${domGeo ? domGeo.region : '-'}</div><div class="geo-note">${domGeo ? pctFmt(domGeo.share_of_total) + ' of revenue' : 'No validated region mix'}</div></div>
+      <div class="geo-card"><div class="geo-kicker">Growth leader</div><div class="geo-value">${growthLeader ? growthLeader.region : '-'}</div><div class="geo-note">${growthLeader ? 'YoY ' + pctFmt(growthLeader.yoy_growth) : 'No multi-year geographic trend'}</div></div>
+      <div class="geo-card"><div class="geo-kicker">Segment dependence</div><div class="geo-value">${domSeg ? domSeg.segment : '-'}</div><div class="geo-note">${domSeg ? pctFmt(domSeg.share_of_total) + ' of segment revenue' : 'No validated segment mix'}</div></div>
+      <div class="geo-card"><div class="geo-kicker">Extraction method</div><div class="geo-value" style="font-size:16px;">${String(extractionMethod).replaceAll('_',' ')}</div><div class="geo-note">Candidate tables: ${data.candidate_tables_found || 0}</div></div>
+    `;
+  }
+
+  function renderGeoDiagnostics(data) {
+    const el = document.getElementById('geoDiagnosticPanel');
+    if (!el) return;
+    const geoRows = data.geographic_revenue_rows || [];
+    const segRows = data.segment_revenue_rows || [];
+    if (geoRows.length || segRows.length) {
+      el.innerHTML = '';
+      return;
+    }
+    const notes = (data.extraction_debug_notes || []).slice(0, 5);
+    const failure = data.extraction_failure_reason || 'No validated region/segment table passed scoring and validation checks.';
+    el.innerHTML = `
+      <div class="geo-diagnostic">
+        <h3>Geographic disclosure not extracted</h3>
+        <ul>
+          <li><strong>Method attempted:</strong> ${data.extraction_method_used || 'unknown'}</li>
+          <li><strong>Probable reason:</strong> ${failure}</li>
+          <li><strong>Candidate table detected:</strong> ${(data.candidate_tables_found || 0) > 0 ? 'Yes (rejected)' : 'No'}</li>
+          ${notes.map(n => `<li>${n}</li>`).join('')}
+        </ul>
+      </div>
+    `;
   }
 
   function renderPeers(rows) {
@@ -838,7 +941,10 @@ APP_HTML = r"""<!doctype html>
       renderGeoRevenue(data.geographic_revenue_rows || []);
       renderSegmentRevenue(data.segment_revenue_rows || []);
       renderGeoTrendChart(data.geographic_revenue_rows || []);
+      renderSegmentTrendChart(data.segment_revenue_rows || []);
       renderMixCharts(data.geographic_mix_rows || [], data.segment_mix_rows || []);
+      renderGeoSummaryCards(data);
+      renderGeoDiagnostics(data);
       renderGeoSegmentSummary(data);
       renderDecision(data.decision_table || []);
       renderWatchlist(data.watchlist || []);
@@ -1864,14 +1970,33 @@ def _normalize_bucket_label(raw: str) -> str:
     region_map = [
         (r"(united states and canada|u\.s\.\s*&\s*canada|us\s*&\s*canada|ucan)", "UCAN"),
         (r"(united states|u\.s\.|^us$|north america)", "United States / North America"),
-        (r"(emea|europe|middle east|africa)", "EMEA / Europe"),
-        (r"(apac|asia[\s\-]?pacific|asia pacific)", "APAC / Asia Pacific"),
-        (r"(latin america|latam|south america)", "Latin America / LATAM"),
+        (r"(emea|europe|middle east|africa)", "EMEA"),
+        (r"(apac|asia[\s\-]?pacific|asia pacific)", "APAC"),
+        (r"(latin america|latam|south america)", "LATAM"),
         (r"(china)", "China"),
         (r"(japan)", "Japan"),
-        (r"(other|rest of world|international)", "Other / International"),
+        (r"(other|rest of world|international)", "International / Other"),
     ]
     for pattern, normalized in region_map:
+        if re.search(pattern, low):
+            return normalized
+    return txt[:80]
+
+
+def _normalize_segment_label(raw: str) -> str:
+    txt = str(raw or "").strip()
+    low = txt.lower()
+    segment_map = [
+        (r"(streaming)", "Streaming"),
+        (r"(products?)", "Products"),
+        (r"(cloud)", "Cloud"),
+        (r"(advertising|ads?)", "Advertising"),
+        (r"(services?)", "Services"),
+        (r"(hardware)", "Hardware"),
+        (r"(enterprise)", "Enterprise"),
+        (r"(consumer)", "Consumer"),
+    ]
+    for pattern, normalized in segment_map:
         if re.search(pattern, low):
             return normalized
     return txt[:80]
@@ -1928,6 +2053,89 @@ def _table_kind_for_geo_segment(cols: list[str], first_col_samples: list[str], c
     return None
 
 
+def _looks_revenue_related(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(x in low for x in ["revenue", "revenues", "sales", "streaming", "net sales", "turnover"])
+
+
+def _is_year_cell(raw: Any) -> bool:
+    return bool(re.search(r"20\d{2}", str(raw or "")))
+
+
+def _candidate_heading_signals() -> list[str]:
+    return [
+        "streaming revenues by region",
+        "revenues by region",
+        "geographic information",
+        "segment information",
+        "reportable segments",
+        "international revenues",
+        "domestic and international",
+        "revenue by geography",
+        "regional revenue",
+    ]
+
+
+def _score_table_candidate(df: pd.DataFrame, context_text: str) -> dict[str, Any]:
+    cols = [str(c).strip() for c in df.columns]
+    first_col = str(cols[0]) if cols else ""
+    sample_labels = [str(x) for x in df[first_col].head(40).tolist()] if first_col in df.columns else []
+    kind = _table_kind_for_geo_segment(cols, sample_labels, context_text=context_text)
+    low_context = str(context_text or "").lower()
+    heading_bonus = sum(1 for h in _candidate_heading_signals() if h in low_context)
+    year_pos = _extract_year_tokens(cols)
+    if len(year_pos) < 1 and len(df) > 0:
+        first_row = df.iloc[0].tolist()
+        year_pos = [(idx, int(m.group(1))) for idx, cell in enumerate(first_row) if (m := re.search(r"(20\d{2})", str(cell)))]
+    labels = sample_labels[:30]
+    region_hits = sum(1 for x in labels if _normalize_bucket_label(x) != x[:80])
+    segment_hits = sum(1 for x in labels if _normalize_segment_label(x) != x[:80])
+    numeric_cells = 0
+    numeric_total = 0
+    for _, row in df.head(50).iterrows():
+        for pos, _ in year_pos[:4]:
+            if pos >= len(row):
+                continue
+            numeric_total += 1
+            if _parse_numeric(row.iloc[pos]) is not None:
+                numeric_cells += 1
+    numeric_consistency = (numeric_cells / numeric_total) if numeric_total else 0.0
+    row_total_score = 0
+    for _, row in df.iterrows():
+        low_label = str(row.iloc[0]).lower().strip() if len(row) else ""
+        if "total" not in low_label:
+            continue
+        vals = []
+        for pos, _ in year_pos[:3]:
+            v = _parse_numeric(row.iloc[pos] if pos < len(row) else None)
+            if v and v > 0:
+                vals.append(v)
+        if vals:
+            row_total_score = 1
+            break
+    revenue_context = 1 if _looks_revenue_related(" ".join(cols) + " " + " ".join(labels) + " " + context_text) else 0
+    relevance_score = (
+        (8 if kind == "geography" else 6 if kind == "segment" else 0)
+        + min(region_hits, 4)
+        + min(segment_hits, 3)
+        + (4 if len(year_pos) >= 2 else 1 if len(year_pos) == 1 else 0)
+        + int(numeric_consistency * 5)
+        + heading_bonus
+        + (3 if revenue_context else 0)
+        + row_total_score
+    )
+    return {
+        "kind": kind,
+        "score": relevance_score,
+        "year_pos": year_pos,
+        "numeric_consistency": round(numeric_consistency, 3),
+        "revenue_context": bool(revenue_context),
+        "region_hits": region_hits,
+        "segment_hits": segment_hits,
+        "heading_bonus": heading_bonus,
+    }
+
+
 def _parse_html_table_to_frame(table: Any) -> pd.DataFrame | None:
     try:
         rows: list[list[str]] = []
@@ -1975,19 +2183,34 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
     seg_raw: dict[tuple[int, str], float] = {}
     totals_by_year: dict[int, float] = {}
     warnings: list[str] = list(fetch_warnings)
-    for frame_entry in frames:
+    debug_notes: list[str] = []
+    candidate_tables: list[dict[str, Any]] = []
+    extraction_method = "none"
+    extraction_failure_reason = ""
+    for idx, frame_entry in enumerate(frames):
         try:
             df = frame_entry["frame"].copy()
             context_text = str(frame_entry.get("context", ""))
             df.columns = [str(c).strip() for c in df.columns]
-            year_pos = _extract_year_tokens(list(df.columns))
-            if len(year_pos) < 2:
+            if df.empty or df.shape[1] < 2:
                 continue
-            first_col = str(df.columns[0])
-            sample_labels = [str(x) for x in df[first_col].head(30).tolist()]
-            kind = _table_kind_for_geo_segment(list(df.columns), sample_labels, context_text=context_text)
+            score = _score_table_candidate(df, context_text)
+            candidate_tables.append({
+                "table_index": idx,
+                "kind": score.get("kind") or "unknown",
+                "score": score.get("score", 0),
+                "numeric_consistency": score.get("numeric_consistency", 0),
+                "revenue_context": score.get("revenue_context", False),
+                "context_excerpt": context_text[:180],
+            })
+            kind = score.get("kind")
             if kind is None:
                 continue
+            year_pos = score.get("year_pos", [])
+            if len(year_pos) < 1:
+                continue
+            if len(year_pos) == 1:
+                debug_notes.append(f"Table {idx} had only one year column; accepted for partial extraction")
             for _, row in df.iterrows():
                 raw_label = str(row.iloc[0]).strip()
                 if len(raw_label) < 2:
@@ -1996,7 +2219,7 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                 if any(skip in low_label for skip in ["elimination", "consolidated", "intersegment"]):
                     continue
                 is_total_row = "total" in low_label
-                bucket = _normalize_bucket_label(raw_label) if kind == "geography" else raw_label[:80]
+                bucket = _normalize_bucket_label(raw_label) if kind == "geography" else _normalize_segment_label(raw_label)
                 for pos, year in year_pos:
                     value = _parse_numeric(row.iloc[pos] if pos < len(row) else None)
                     if value is None or value <= 0:
@@ -2009,9 +2232,35 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                         geo_raw[key] = max(geo_raw.get(key, 0.0), value)
                     else:
                         seg_raw[key] = max(seg_raw.get(key, 0.0), value)
+            if geo_raw or seg_raw:
+                extraction_method = "table_first_scored"
         except Exception as exc:
             warnings.append(f"Disclosure parsing warning: {exc}")
             continue
+
+    def _validate_raw(raw_map: dict[tuple[int, str], float], label_key: str) -> tuple[bool, str]:
+        if not raw_map:
+            return False, f"No {label_key} rows parsed"
+        years = sorted({y for (y, _) in raw_map.keys()})
+        labels = sorted({l for (_, l) in raw_map.keys()})
+        if len(labels) < 2:
+            return False, f"Only one {label_key} bucket found"
+        if not years:
+            return False, "No year labels detected"
+        if not any(isinstance(y, int) and y > 1990 for y in years):
+            return False, "No numeric filing year extracted"
+        return True, "ok"
+
+    geo_valid, geo_reason = _validate_raw(geo_raw, "region")
+    seg_valid, seg_reason = _validate_raw(seg_raw, "segment")
+    if not geo_valid:
+        debug_notes.append(f"Geographic validation failed: {geo_reason}")
+    if not seg_valid and seg_raw:
+        debug_notes.append(f"Segment validation failed: {seg_reason}")
+    if not geo_valid:
+        geo_raw = {}
+    if not seg_valid:
+        seg_raw = {}
 
     if not geo_raw:
         try:
@@ -2024,6 +2273,8 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                 "us & canada", "u.s. & canada", "united states and canada", "ucan", "united states", "domestic", "emea",
                 "latin america", "latam", "asia pacific", "asia-pacific", "apac", "international",
             ]
+            year_hints = [int(y) for y in re.findall(r"(20\d{2})", fallback_zone)]
+            fallback_year = max(year_hints) if year_hints else 0
             for hint in region_hints:
                 rx = re.compile(rf"{re.escape(hint)}[^0-9]{{0,30}}([0-9][0-9,]{{3,}}(?:\.\d+)?)", re.IGNORECASE)
                 for m in rx.finditer(fallback_zone):
@@ -2031,8 +2282,11 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                     if value is None or value <= 0:
                         continue
                     label = _normalize_bucket_label(hint)
-                    key = (0, label)
+                    key = (fallback_year, label)
                     geo_raw[key] = max(geo_raw.get(key, 0.0), value)
+            if geo_raw:
+                extraction_method = "text_fallback"
+                debug_notes.append("Table parsing did not validate; text fallback produced geographic candidates")
             if geo_raw and all(year == 0 for year, _ in geo_raw.keys()):
                 warnings.append("Geographic rows were extracted from text fallback without explicit year headers")
         except Exception as exc:
@@ -2044,11 +2298,7 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
             r = requests.get(annual["url"], headers=SEC_HEADERS, timeout=40)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "lxml")
-            heading_patterns = [
-                "streaming revenues by region",
-                "revenues by region",
-                "regional streaming revenues",
-            ]
+            heading_patterns = _candidate_heading_signals()
             for node in soup.find_all(["h1", "h2", "h3", "h4", "p", "div", "strong"]):
                 text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).lower()
                 if not text:
@@ -2063,7 +2313,7 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                     continue
                 cols = [str(c).strip() for c in frame.columns]
                 year_pos = _extract_year_tokens(cols)
-                if len(year_pos) < 2:
+                if len(year_pos) < 1:
                     continue
                 first_col = str(cols[0])
                 for _, row in frame.iterrows():
@@ -2080,6 +2330,7 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                         label = _normalize_bucket_label(raw_label)
                         geo_raw[(year, label)] = max(geo_raw.get((year, label), 0.0), value)
                 if geo_raw:
+                    extraction_method = "heading_to_nearest_table"
                     warnings.append("Geographic rows recovered using heading-to-nearest-table fallback")
                     break
         except Exception as exc:
@@ -2091,6 +2342,7 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
     }
     if geo_raw and (len(unique_geo_buckets) < 3 or not years_with_multiple_regions):
         warnings.append("Geographic extraction failed validation: insufficient regional rows in a revenue context")
+        extraction_failure_reason = "Parsed rows did not have enough distinct regions or multi-region yearly coverage"
         geo_raw = {}
 
     def build_rows(raw_map: dict[tuple[int, str], float], label_key: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -2151,6 +2403,30 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
 
     geo_rows, geo_mix, geo_summary = build_rows(geo_raw, "region")
     seg_rows, seg_mix, seg_summary = build_rows(seg_raw, "segment")
+    if not extraction_failure_reason and not geo_rows and not seg_rows:
+        extraction_failure_reason = "No high-confidence geography/segment table passed scoring + validation filters"
+    if extraction_method == "none":
+        extraction_method = "failed_all_methods"
+
+    forensic_signals: list[dict[str, str]] = []
+    if geo_rows:
+        latest_year = max((r.get("year") for r in geo_rows if r.get("year")), default=None)
+        latest_rows = [r for r in geo_rows if r.get("year") == latest_year]
+        dom = max(latest_rows, key=lambda x: safe_float(x.get("share_of_total")) or -1) if latest_rows else None
+        if dom and (safe_float(dom.get("share_of_total")) or 0) >= 0.6:
+            forensic_signals.append({"title": "Concentration risk", "detail": f"{dom.get('region')} exceeds 60% of disclosed revenue", "severity": "Bad"})
+        elif dom and (safe_float(dom.get("share_of_total")) or 0) >= 0.5:
+            forensic_signals.append({"title": "Concentration watch", "detail": f"{dom.get('region')} exceeds 50% of disclosed revenue", "severity": "Warn"})
+        slow_dom = dom and safe_float(dom.get("yoy_growth")) is not None and safe_float(dom.get("yoy_growth")) < -0.03
+        if slow_dom:
+            forensic_signals.append({"title": "Dominant market slowdown", "detail": f"{dom.get('region')} YoY trend is negative", "severity": "Warn"})
+    if seg_rows:
+        latest_year = max((r.get("year") for r in seg_rows if r.get("year")), default=None)
+        latest_rows = [r for r in seg_rows if r.get("year") == latest_year]
+        dom = max(latest_rows, key=lambda x: safe_float(x.get("share_of_total")) or -1) if latest_rows else None
+        if dom and (safe_float(dom.get("share_of_total")) or 0) >= 0.6:
+            forensic_signals.append({"title": "Segment dependence", "detail": f"{dom.get('segment')} is over 60% of disclosed segment revenue", "severity": "Bad"})
+
     if not sources:
         warnings.append("No annual filing tables were parsed from recent 10-K/20-F links")
     return {
@@ -2160,6 +2436,12 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
         "segment_revenue_rows": seg_rows,
         "segment_mix_rows": seg_mix,
         "segment_summary": seg_summary,
+        "extraction_method_used": extraction_method,
+        "extraction_debug_notes": debug_notes + warnings[:6],
+        "candidate_tables_found": len(candidate_tables),
+        "candidate_table_details": sorted(candidate_tables, key=lambda x: x.get("score", 0), reverse=True)[:20],
+        "extraction_failure_reason": extraction_failure_reason,
+        "geo_segment_forensic": {"signals": forensic_signals},
         "disclosure_warnings": warnings,
         "sources": sources,
     }
@@ -3144,6 +3426,12 @@ def analyze() -> Any:
             "segment_revenue_rows": geo_segment.get("segment_revenue_rows", []),
             "segment_mix_rows": geo_segment.get("segment_mix_rows", []),
             "segment_summary": geo_segment.get("segment_summary", {}),
+            "extraction_method_used": geo_segment.get("extraction_method_used", ""),
+            "extraction_debug_notes": geo_segment.get("extraction_debug_notes", []),
+            "candidate_tables_found": geo_segment.get("candidate_tables_found", 0),
+            "candidate_table_details": geo_segment.get("candidate_table_details", []),
+            "extraction_failure_reason": geo_segment.get("extraction_failure_reason", ""),
+            "geo_segment_forensic": geo_segment.get("geo_segment_forensic", {}),
             "decision_table": decision_table,
             "forensic_score": forensic_score,
             "forensic_components": forensic_components,
