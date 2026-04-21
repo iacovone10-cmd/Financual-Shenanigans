@@ -1823,21 +1823,44 @@ def fetch_latest_10k_text(ticker: str) -> str:
         return ""
 
 
-def fetch_latest_annual_filing_table_frames(ticker: str, max_filings: int = 3) -> tuple[list[pd.DataFrame], list[dict[str, str]]]:
+def fetch_latest_annual_filing_table_frames(ticker: str, max_filings: int = 3) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
     filings = get_sec_recent_filings(ticker, max_items=max_filings + 3)
     annuals = [f for f in filings if f.get("form") in {"10-K", "20-F"}][:max_filings]
-    frames: list[pd.DataFrame] = []
+    frames: list[dict[str, Any]] = []
     used_sources: list[dict[str, str]] = []
+    warnings: list[str] = []
     for filing in annuals:
         try:
-            tables = pd.read_html(filing["url"])
-            for t in tables:
-                if not t.empty and t.shape[0] >= 2 and t.shape[1] >= 2:
-                    frames.append(t)
+            r = requests.get(filing["url"], headers=SEC_HEADERS, timeout=40)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "lxml")
+            html_tables = soup.find_all("table")
+            for table in html_tables:
+                try:
+                    parsed = pd.read_html(str(table))
+                except Exception:
+                    continue
+                if not parsed:
+                    continue
+                context_nodes: list[str] = []
+                prev = table
+                for _ in range(3):
+                    prev = prev.find_previous(["p", "div", "h1", "h2", "h3", "h4"])
+                    if not prev:
+                        break
+                    txt = re.sub(r"\s+", " ", prev.get_text(" ", strip=True))
+                    if txt:
+                        context_nodes.append(txt)
+                context_text = " | ".join(context_nodes[:3])
+                for t in parsed:
+                    if t.empty or t.shape[0] < 2 or t.shape[1] < 2:
+                        continue
+                    frames.append({"frame": t, "context": context_text, "source_url": filing.get("url", "")})
             used_sources.append(filing)
-        except Exception:
+        except Exception as exc:
+            warnings.append(f"Table parsing failed for {filing.get('form', 'annual filing')} {filing.get('filing_date', '')}: {exc}")
             continue
-    return frames, used_sources
+    return frames, used_sources, warnings
 
 
 def _normalize_bucket_label(raw: str) -> str:
@@ -1884,34 +1907,47 @@ def _parse_numeric(v: Any) -> float | None:
         return None
 
 
-def _table_kind_for_geo_segment(cols: list[str], first_col_samples: list[str]) -> str | None:
+def _table_kind_for_geo_segment(cols: list[str], first_col_samples: list[str], context_text: str = "") -> str | None:
     low_cols = " ".join(str(c).lower() for c in cols)
-    low_rows = " ".join(str(x).lower() for x in first_col_samples[:25])
-    hay = low_cols + " " + low_rows
-    geo_signals = ["geographic", "by geography", "by region", "international", "north america", "emea", "apac"]
-    seg_signals = ["segment", "business unit", "operating segment", "by segment", "product line"]
-    if any(s in hay for s in geo_signals):
+    low_rows = " ".join(str(x).lower() for x in first_col_samples[:35])
+    context = str(context_text or "").lower()
+    hay = low_cols + " " + low_rows + " " + context
+    geo_signals = [
+        "geographic", "geography", "region", "international", "domestic", "united states", "north america",
+        "us & canada", "u.s. & canada", "emea", "latin america", "asia pacific", "apac",
+        "revenues by geography", "revenue by region", "streaming revenue by region",
+    ]
+    seg_signals = ["segment", "business unit", "operating segment", "by segment", "product line", "reportable segment"]
+    geo_score = sum(1 for s in geo_signals if s in hay)
+    seg_score = sum(1 for s in seg_signals if s in hay)
+    if ("item 8" in hay or "notes to consolidated financial statements" in hay or "item 7" in hay) and geo_score >= 1:
+        geo_score += 1
+    if ("item 8" in hay or "notes to consolidated financial statements" in hay) and seg_score >= 1:
+        seg_score += 1
+    if geo_score >= 2 and geo_score >= seg_score:
         return "geography"
-    if any(s in hay for s in seg_signals):
+    if seg_score >= 1 and seg_score > geo_score:
         return "segment"
     return None
 
 
 def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
-    frames, sources = fetch_latest_annual_filing_table_frames(ticker)
+    frames, sources, fetch_warnings = fetch_latest_annual_filing_table_frames(ticker)
     geo_raw: dict[tuple[int, str], float] = {}
     seg_raw: dict[tuple[int, str], float] = {}
-    warnings: list[str] = []
-    for frame in frames:
+    totals_by_year: dict[int, float] = {}
+    warnings: list[str] = list(fetch_warnings)
+    for frame_entry in frames:
         try:
-            df = frame.copy()
+            df = frame_entry["frame"].copy()
+            context_text = str(frame_entry.get("context", ""))
             df.columns = [str(c).strip() for c in df.columns]
             year_pos = _extract_year_tokens(list(df.columns))
             if len(year_pos) < 2:
                 continue
             first_col = str(df.columns[0])
             sample_labels = [str(x) for x in df[first_col].head(30).tolist()]
-            kind = _table_kind_for_geo_segment(list(df.columns), sample_labels)
+            kind = _table_kind_for_geo_segment(list(df.columns), sample_labels, context_text=context_text)
             if kind is None:
                 continue
             for _, row in df.iterrows():
@@ -1919,24 +1955,54 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                 if len(raw_label) < 2:
                     continue
                 low_label = raw_label.lower()
-                if any(skip in low_label for skip in ["total", "elimination", "consolidated", "intersegment"]):
+                if any(skip in low_label for skip in ["elimination", "consolidated", "intersegment"]):
                     continue
+                is_total_row = "total" in low_label
                 bucket = _normalize_bucket_label(raw_label) if kind == "geography" else raw_label[:80]
                 for pos, year in year_pos:
                     value = _parse_numeric(row.iloc[pos] if pos < len(row) else None)
                     if value is None or value <= 0:
+                        continue
+                    if is_total_row:
+                        totals_by_year[year] = max(totals_by_year.get(year, 0.0), value)
                         continue
                     key = (year, bucket)
                     if kind == "geography":
                         geo_raw[key] = max(geo_raw.get(key, 0.0), value)
                     else:
                         seg_raw[key] = max(seg_raw.get(key, 0.0), value)
-        except Exception:
+        except Exception as exc:
+            warnings.append(f"Disclosure parsing warning: {exc}")
             continue
+
+    if not geo_raw:
+        try:
+            filing_text = fetch_latest_10k_text(ticker)
+            item8 = extract_section_excerpt(filing_text, "item 8", ["item 9", "item 9a"], max_len=8000)
+            notes = extract_section_excerpt(filing_text, "notes to consolidated financial statements", ["item 9", "item 8"], max_len=8000)
+            item7 = extract_section_excerpt(filing_text, "item 7", ["item 7a", "item 8"], max_len=8000)
+            fallback_zone = " ".join([item8, notes, item7])
+            region_hints = [
+                "us & canada", "u.s. & canada", "united states", "domestic", "emea",
+                "latin america", "asia pacific", "apac", "international",
+            ]
+            for hint in region_hints:
+                rx = re.compile(rf"{re.escape(hint)}[^0-9]{{0,30}}([0-9][0-9,]{{3,}}(?:\.\d+)?)", re.IGNORECASE)
+                for m in rx.finditer(fallback_zone):
+                    value = _parse_numeric(m.group(1))
+                    if value is None or value <= 0:
+                        continue
+                    label = _normalize_bucket_label(hint)
+                    key = (0, label)
+                    geo_raw[key] = max(geo_raw.get(key, 0.0), value)
+            if geo_raw and all(year == 0 for year, _ in geo_raw.keys()):
+                warnings.append("Geographic rows were extracted from text fallback without explicit year headers")
+        except Exception as exc:
+            warnings.append(f"Text fallback extraction failed: {exc}")
 
     def build_rows(raw_map: dict[tuple[int, str], float], label_key: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         if not raw_map:
-            return [], [], {"summary": "", "warnings": [f"{label_key.title()} revenue disclosure not available for this filing"], "severity": "Warn"}
+            return [], [], {"summary": "", "warnings": [f"{label_key.title()} extraction attempted but no valid rows were parsed"], "severity": "Warn"}
         rows = [{"year": y, label_key: bucket, "revenue": val} for (y, bucket), val in raw_map.items()]
         rows.sort(key=lambda x: (x["year"], str(x[label_key])))
         totals: dict[int, float] = {}
@@ -1978,6 +2044,16 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
         negative_yoy = [r for r in full_rows if r.get("yoy_growth") is not None and r["yoy_growth"] < -0.05]
         if negative_yoy:
             local_warnings.append("At least one disclosed bucket shows material YoY deterioration")
+        if label_key == "region":
+            for year in years:
+                disclosed_total = totals.get(year)
+                filing_total = totals_by_year.get(year)
+                if disclosed_total and filing_total and filing_total > 0:
+                    gap = abs(disclosed_total - filing_total) / filing_total
+                    if gap > 0.2:
+                        local_warnings.append(
+                            f"Regional rows for {year} differ materially from disclosed total revenue (gap {gap * 100:.1f}%)"
+                        )
         return full_rows, mix_rows, {"summary": summary, "warnings": local_warnings, "severity": sev, "dominant_bucket": dominant[label_key] if dominant else None}
 
     geo_rows, geo_mix, geo_summary = build_rows(geo_raw, "region")
