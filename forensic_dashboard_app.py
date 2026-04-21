@@ -293,6 +293,10 @@ APP_HTML = r"""<!doctype html>
       <div class="panel span-6"><div class="section-title"><h2>Cash flow breakdown</h2><span class="muted">Operating cash quality</span></div><div style="overflow:auto;"><table><thead><tr><th>Period</th><th>CFO</th><th>CapEx</th><th>FCF</th><th>Acquisitions</th><th>CFO/NI</th></tr></thead><tbody id="cashflowBody"></tbody></table></div></div>
       <div class="panel span-3"><div class="section-title"><h2>Acquisition analysis</h2><span class="muted">Roll-up risk</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Comment</th></tr></thead><tbody id="acqBody"></tbody></table></div></div>
       <div class="panel span-3"><div class="section-title"><h2>Cash flow red flags</h2><span class="muted">Automatic alerts</span></div><div class="flags" id="cashFlagsBox"></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Ticker acquisitions</h2><span class="muted">Recent announced transactions</span></div><div class="flags" id="tickerAcqSummaryBox"></div><div style="overflow:auto; margin-top:10px;"><table><thead><tr><th>Acquirer</th><th>Target</th><th>Announced</th><th>Closed</th><th>Value</th><th>Type</th><th>Rationale</th><th>Source</th></tr></thead><tbody id="tickerAcqBody"></tbody></table></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Insider / board sales</h2><span class="muted">Selected ticker monitoring</span></div><div class="flags" id="insiderSummaryBox"></div><div style="overflow:auto; margin-top:10px;"><table><thead><tr><th>Name</th><th>Role</th><th>Date</th><th>Shares sold</th><th>Value</th><th>Type</th><th>Source</th></tr></thead><tbody id="insiderSalesBody"></tbody></table></div></div>
+      <div class="panel span-12"><div class="section-title"><h2>Global M&A recap</h2><span class="muted">Major acquisitions and mergers (geography may be unavailable)</span><select id="maSortSelect" class="select" style="max-width:180px;"><option value="recency" selected>Sort: recency</option><option value="value">Sort: value</option><option value="sector">Sort: sector</option></select></div><div style="overflow:auto;"><table><thead><tr><th>Buyer</th><th>Seller</th><th>Target / Asset</th><th>Date</th><th>Sector</th><th>Geography</th><th>Value</th><th>Summary</th><th>Source</th></tr></thead><tbody id="globalMaBody"></tbody></table></div></div>
+      <div class="panel span-12"><div class="section-title"><h2>Global divestitures recap</h2><span class="muted">Recent major asset sales (geography may be unavailable)</span></div><div style="overflow:auto;"><table><thead><tr><th>Seller</th><th>Buyer</th><th>Asset</th><th>Date</th><th>Sector</th><th>Geography</th><th>Value</th><th>Summary</th><th>Source</th></tr></thead><tbody id="globalDivBody"></tbody></table></div></div>
 
       <div class="panel span-4"><div class="section-title"><h2>Working capital</h2><span class="muted">Balance sheet pressure</span></div><div style="overflow:auto;"><table><thead><tr><th>Period</th><th>AR</th><th>Inventory</th><th>Payables</th><th>AR growth</th><th>Inv growth</th><th>Payables growth</th></tr></thead><tbody id="workingCapitalBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>CFO / NI trend</h2><span class="muted">Multi-period cash conversion</span></div><div id="cfoNiTrendChart" style="height:320px;"></div></div>
@@ -481,6 +485,56 @@ APP_HTML = r"""<!doctype html>
 
   function renderAcqTable(rows) {
     document.getElementById('acqBody').innerHTML = rows.map(r => `<tr><td>${r.metric}</td><td>${r.value}</td><td>${r.comment}</td></tr>`).join('');
+  }
+
+  function renderTickerAcquisitions(rows, summary) {
+    const body = document.getElementById('tickerAcqBody');
+    const box = document.getElementById('tickerAcqSummaryBox');
+    if (!body || !box) return;
+    if (!rows || !rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="muted">No recent ticker acquisition events were extracted from public feeds.</td></tr>';
+    } else {
+      body.innerHTML = rows.map(r => `<tr><td>${r.acquirer || '-'}</td><td>${r.target_name || '-'}</td><td>${r.announcement_date || '-'}</td><td>${r.close_date || '-'}</td><td>${r.deal_value || '-'}</td><td>${r.deal_type || '-'}</td><td>${r.rationale || '-'}</td><td>${r.source_link ? `<a href="${r.source_link}" target="_blank">Link</a>` : '-'}</td></tr>`).join('');
+    }
+    const cls = (summary?.risk_level || 'Warn').toLowerCase();
+    const warns = (summary?.warnings || []).map(w => `<div class="muted small">• ${w}</div>`).join('');
+    box.innerHTML = `<div class="flag ${cls}"><div class="t">Acquisition interpretation</div><div class="muted">${summary?.interpretation || 'Acquisition interpretation unavailable due to limited data.'}</div>${warns}</div>`;
+  }
+
+  function renderInsiderSales(rows, summary) {
+    const body = document.getElementById('insiderSalesBody');
+    const box = document.getElementById('insiderSummaryBox');
+    if (!body || !box) return;
+    if (!rows || !rows.length) {
+      body.innerHTML = '<tr><td colspan="7" class="muted">No recent insider sale rows were available from connected sources.</td></tr>';
+    } else {
+      body.innerHTML = rows.map(r => `<tr><td>${r.insider_name || '-'}</td><td>${r.role || '-'}</td><td>${r.transaction_date || '-'}</td><td>${r.shares_sold === null || r.shares_sold === undefined ? '-' : numFmt(r.shares_sold, 0)}</td><td>${moneyFmt(r.transaction_value)}</td><td>${r.transaction_type || '-'}</td><td>${r.source_link ? `<a href="${r.source_link}" target="_blank">Link</a>` : '-'}</td></tr>`).join('');
+    }
+    const cls = (summary?.risk_level || 'Warn').toLowerCase();
+    const warns = (summary?.warnings || []).map(w => `<div class="muted small">• ${w}</div>`).join('');
+    box.innerHTML = `<div class="flag ${cls}"><div class="t">Insider activity interpretation</div><div class="muted">${summary?.interpretation || 'Insider interpretation unavailable due to limited data.'}</div>${warns}</div>`;
+  }
+
+  function sortGlobalDeals(rows, mode) {
+    const copy = [...(rows || [])];
+    if (mode === 'value') {
+      copy.sort((a, b) => (b.value_numeric || 0) - (a.value_numeric || 0));
+    } else if (mode === 'sector') {
+      copy.sort((a, b) => String(a.sector || '').localeCompare(String(b.sector || '')));
+    } else {
+      copy.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    }
+    return copy;
+  }
+
+  function renderGlobalDeals(rows, bodyId, emptyMsg) {
+    const el = document.getElementById(bodyId);
+    if (!el) return;
+    if (!rows || !rows.length) {
+      el.innerHTML = `<tr><td colspan="9" class="muted">${emptyMsg}</td></tr>`;
+      return;
+    }
+    el.innerHTML = rows.map(r => `<tr><td>${r.buyer || '-'}</td><td>${r.seller || '-'}</td><td>${r.target_or_asset || '-'}</td><td>${r.date || '-'}</td><td>${r.sector || '-'}</td><td>${r.geography || 'Not available'}</td><td>${r.value || '-'}</td><td>${r.summary || '-'}</td><td>${r.source_link ? `<a href="${r.source_link}" target="_blank">Link</a>` : '-'}</td></tr>`).join('');
   }
 
   function renderCashFlags(rows) {
@@ -925,6 +979,11 @@ APP_HTML = r"""<!doctype html>
       renderQualityTable(data.quality_rows || []);
       renderCashflow(data.cashflow_rows || []);
       renderAcqTable(data.acquisition_table || []);
+      renderTickerAcquisitions(data.ticker_acquisitions || [], data.ticker_acquisition_summary || null);
+      renderInsiderSales(data.insider_sales_rows || [], data.insider_sales_summary || null);
+      const sortMode = (document.getElementById('maSortSelect') || {}).value || 'recency';
+      renderGlobalDeals(sortGlobalDeals(data.global_ma_deals || [], sortMode), 'globalMaBody', 'No major global acquisition/merger rows available from current feeds.');
+      renderGlobalDeals(sortGlobalDeals(data.global_divestitures || [], sortMode), 'globalDivBody', 'No major global divestiture rows available from current feeds.');
       renderCashFlags(data.cashflow_flags || []);
       renderMacro(data.macro || []);
       renderMovers('gainersBody', data.top_gainers || []);
@@ -960,6 +1019,12 @@ APP_HTML = r"""<!doctype html>
   }
 
   document.getElementById('analyzeBtn').addEventListener('click', runAnalysis);
+  document.getElementById('maSortSelect').addEventListener('change', () => {
+    if (!currentPayload) return;
+    const sortMode = (document.getElementById('maSortSelect') || {}).value || 'recency';
+    renderGlobalDeals(sortGlobalDeals(currentPayload.global_ma_deals || [], sortMode), 'globalMaBody', 'No major global acquisition/merger rows available from current feeds.');
+    renderGlobalDeals(sortGlobalDeals(currentPayload.global_divestitures || [], sortMode), 'globalDivBody', 'No major global divestiture rows available from current feeds.');
+  });
   document.getElementById('screenerBtn').addEventListener('click', loadScreener);
   document.getElementById('tickerInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') runAnalysis(); });
   document.getElementById('copyBtn').addEventListener('click', async () => {
@@ -1209,6 +1274,169 @@ def get_news_google_rss(query: str, limit: int = 8) -> list[dict[str, str]]:
         return items
     except Exception:
         return []
+
+
+def _parse_deal_value(text: str) -> tuple[str | None, float | None]:
+    m = re.search(r"\$([0-9]+(?:\.[0-9]+)?)\s*(billion|million|bn|mn|b|m)\b", text, re.IGNORECASE)
+    if not m:
+        return None, None
+    amt = safe_float(m.group(1))
+    unit = m.group(2).lower()
+    if amt is None:
+        return None, None
+    mult = 1.0
+    if unit in {"billion", "bn", "b"}:
+        mult = 1_000_000_000.0
+    elif unit in {"million", "mn", "m"}:
+        mult = 1_000_000.0
+    return f"${amt:.2f}{'B' if mult >= 1_000_000_000 else 'M'}", amt * mult
+
+
+def _extract_target_name(title: str) -> str | None:
+    patterns = [
+        r"(?:to acquire|acquires|buy|buys|merger with)\s+([A-Z][A-Za-z0-9&\-. ]{2,60})",
+        r"sale of\s+([A-Z][A-Za-z0-9&\-. ]{2,60})",
+        r"divest(?:s|iture)\s+([A-Z][A-Za-z0-9&\-. ]{2,60})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, title, re.IGNORECASE)
+        if m:
+            return re.sub(r"\s+", " ", m.group(1)).strip(" .,-")
+    return None
+
+
+def build_ticker_acquisition_detail(ticker: str, company_name: str, acq_metrics: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = []
+    sources = get_news_google_rss(f"{ticker} acquisition merger deal buy target", limit=10)
+    for item in sources:
+        title = item.get("title") or ""
+        tl = title.lower()
+        if not any(k in tl for k in ["acquir", "merger", "buy", "deal", "purchase"]):
+            continue
+        deal_value, value_num = _parse_deal_value(title)
+        rows.append({
+            "acquirer": company_name or ticker,
+            "target_name": _extract_target_name(title) or "Not specified",
+            "announcement_date": item.get("published", ""),
+            "close_date": "",
+            "deal_value": deal_value or "Not disclosed",
+            "deal_type": "Acquisition / merger",
+            "rationale": title,
+            "source_link": item.get("link", ""),
+            "value_numeric": value_num,
+        })
+    rows = rows[:8]
+    acq_to_cfo = safe_float(acq_metrics.get("acq_to_cfo"))
+    warnings = []
+    if len(rows) >= 3:
+        warnings.append("Serial acquirer pattern: multiple recent acquisition headlines.")
+    if acq_to_cfo is not None and acq_to_cfo > 0.5:
+        warnings.append("Acquisition-heavy growth: acquisitions are large relative to CFO.")
+    if acq_to_cfo is not None and acq_to_cfo > 0.8:
+        warnings.append("Roll-up risk: repeated deal spend can pressure post-deal execution and goodwill quality.")
+    if acq_to_cfo is not None and acq_to_cfo > 1.0:
+        warnings.append("Potential goodwill / intangible build-up risk due to very large deal spend vs cash generation.")
+    if warnings:
+        interpretation = "The company appears to be using acquisitions as a major growth lever."
+        risk_level = "Warn" if acq_to_cfo is None or acq_to_cfo <= 0.8 else "Bad"
+    else:
+        interpretation = "Recent acquisition activity appears limited based on currently available sources."
+        risk_level = "Ok"
+    summary = {
+        "interpretation": interpretation,
+        "warnings": warnings,
+        "risk_level": risk_level,
+        "event_count": len(rows),
+    }
+    return rows, summary
+
+
+def build_global_ma_recap() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ma_rows = []
+    div_rows = []
+    ma_news = get_news_google_rss("major acquisition merger announced deal value", limit=16)
+    div_news = get_news_google_rss("major divestiture asset sale announced deal value", limit=16)
+    for item in ma_news:
+        title = item.get("title") or ""
+        lower = title.lower()
+        if not any(k in lower for k in ["acquir", "merger", "buyout", "purchase", "deal"]):
+            continue
+        deal_value, value_num = _parse_deal_value(title)
+        ma_rows.append({
+            "buyer": "Not specified",
+            "seller": "-",
+            "target_or_asset": _extract_target_name(title) or "Not specified",
+            "date": item.get("published", ""),
+            "sector": "General",
+            "geography": "Not available",
+            "value": deal_value or "Not disclosed",
+            "value_numeric": value_num,
+            "summary": title,
+            "source_link": item.get("link", ""),
+        })
+    for item in div_news:
+        title = item.get("title") or ""
+        lower = title.lower()
+        if not any(k in lower for k in ["divest", "asset sale", "sells", "sale of"]):
+            continue
+        deal_value, value_num = _parse_deal_value(title)
+        div_rows.append({
+            "buyer": "Not specified",
+            "seller": "Not specified",
+            "target_or_asset": _extract_target_name(title) or "Not specified",
+            "date": item.get("published", ""),
+            "sector": "General",
+            "geography": "Not available",
+            "value": deal_value or "Not disclosed",
+            "value_numeric": value_num,
+            "summary": title,
+            "source_link": item.get("link", ""),
+        })
+    return ma_rows[:14], div_rows[:14]
+
+
+def build_insider_sales_detail(ticker: str, forensic_score: float | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = []
+    try:
+        tmap = get_companyfacts_ticker_map()
+        info = tmap.get(ticker.upper())
+        if info:
+            cik = str(info["cik_str"]).zfill(10)
+            url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+            r = requests.get(url, headers=SEC_HEADERS, timeout=30)
+            r.raise_for_status()
+            recent = (r.json().get("filings", {}) or {}).get("recent", {})
+            for form, dt, acc, doc in zip(recent.get("form", []), recent.get("filingDate", []), recent.get("accessionNumber", []), recent.get("primaryDocument", [])):
+                if form != "4":
+                    continue
+                rows.append({
+                    "insider_name": "Form 4 filer",
+                    "role": "Officer/Director (role detail unavailable)",
+                    "transaction_date": dt,
+                    "shares_sold": None,
+                    "transaction_value": None,
+                    "transaction_type": "Potential sale (Form 4 filing)",
+                    "source_link": f"https://www.sec.gov/Archives/edgar/data/{int(info['cik_str'])}/{acc.replace('-', '')}/{doc}",
+                })
+                if len(rows) >= 12:
+                    break
+    except Exception:
+        rows = []
+    warnings = []
+    if len(rows) >= 4:
+        warnings.append("Cluster insider selling signal: multiple Form 4 events in a short period.")
+        warnings.append("Board + executive alignment should be reviewed manually in linked Form 4 filings.")
+    if len(rows) >= 8:
+        warnings.append("Unusually large insider transaction cadence detected (count-based warning).")
+    if forensic_score is not None and forensic_score < 45 and rows:
+        warnings.append("Insider selling while forensic score is weak may warrant closer review.")
+    if warnings:
+        interpretation = "Multiple recent insider sales may warrant closer review, especially if operational quality is weakening."
+        risk_level = "Warn" if len(rows) < 8 else "Bad"
+    else:
+        interpretation = "Recent insider selling is limited and not yet clustered."
+        risk_level = "Ok"
+    return rows, {"interpretation": interpretation, "warnings": warnings, "risk_level": risk_level, "event_count": len(rows)}
 
 
 def history_last_and_5d_change(symbol: str, period: str = "1mo") -> tuple[float | None, float | None]:
@@ -3324,6 +3552,16 @@ def analyze() -> Any:
         text_signals, text_excerpts = analyze_filing_text(filing_text)
         geo_segment = extract_geographic_and_segment_disclosures(ticker)
         flags, risk, latest_cfo_ni, beneish, forensic_components = generate_flags(quality_rows, text_signals=text_signals)
+        forensic_score, _, _ = compute_forensic_score(
+            latest_cfo_ni,
+            beneish,
+            len(flags),
+            components=forensic_components,
+            text_signals=text_signals,
+        )
+        ticker_acquisitions, ticker_acquisition_summary = build_ticker_acquisition_detail(ticker, info.get("long_name", ticker), acq_metrics)
+        global_ma_deals, global_divestitures = build_global_ma_recap()
+        insider_sales_rows, insider_sales_summary = build_insider_sales_detail(ticker, forensic_score=forensic_score)
         item7_excerpt = extract_section_excerpt(filing_text, "item 7", ["item 7a", "item 8"])
         item9a_excerpt = extract_section_excerpt(filing_text, "item 9a", ["item 9b", "item 10"])
         filing_evidence = build_filing_evidence_snapshot(filing_text, filings)
@@ -3359,13 +3597,6 @@ def analyze() -> Any:
                     )
                     geo_segment["segment_summary"]["severity"] = "Bad"
         decision_table = build_decision_table(latest_metrics, flags, risk, info["long_name"], components=forensic_components)
-        forensic_score, _, _ = compute_forensic_score(
-            latest_cfo_ni,
-            beneish,
-            len(flags),
-            components=forensic_components,
-            text_signals=text_signals,
-        )
         earnings_quality_classification = classify_earnings_quality(
             forensic_score,
             risk,
@@ -3405,6 +3636,12 @@ def analyze() -> Any:
             "trend_signals": trend_signals,
             "cashflow_rows": cashflow_rows,
             "acquisition_table": acquisition_table,
+            "ticker_acquisitions": ticker_acquisitions,
+            "ticker_acquisition_summary": ticker_acquisition_summary,
+            "insider_sales_rows": insider_sales_rows,
+            "insider_sales_summary": insider_sales_summary,
+            "global_ma_deals": global_ma_deals,
+            "global_divestitures": global_divestitures,
             "cashflow_flags": cashflow_flags,
             "flags": flags,
             "risk_level": risk,
