@@ -1836,23 +1836,18 @@ def fetch_latest_annual_filing_table_frames(ticker: str, max_filings: int = 3) -
             soup = BeautifulSoup(r.text, "lxml")
             html_tables = soup.find_all("table")
             for table in html_tables:
+                parsed_frames: list[pd.DataFrame] = []
                 try:
-                    parsed = pd.read_html(str(table))
+                    parsed_frames.extend(pd.read_html(str(table)))
                 except Exception:
+                    pass
+                robust_frame = _parse_html_table_to_frame(table)
+                if robust_frame is not None:
+                    parsed_frames.append(robust_frame)
+                if not parsed_frames:
                     continue
-                if not parsed:
-                    continue
-                context_nodes: list[str] = []
-                prev = table
-                for _ in range(3):
-                    prev = prev.find_previous(["p", "div", "h1", "h2", "h3", "h4"])
-                    if not prev:
-                        break
-                    txt = re.sub(r"\s+", " ", prev.get_text(" ", strip=True))
-                    if txt:
-                        context_nodes.append(txt)
-                context_text = " | ".join(context_nodes[:3])
-                for t in parsed:
+                context_text = _table_context_text(table)
+                for t in parsed_frames:
                     if t.empty or t.shape[0] < 2 or t.shape[1] < 2:
                         continue
                     frames.append({"frame": t, "context": context_text, "source_url": filing.get("url", "")})
@@ -1867,10 +1862,11 @@ def _normalize_bucket_label(raw: str) -> str:
     txt = str(raw or "").strip()
     low = txt.lower()
     region_map = [
-        (r"(united states|u\.s\.|us|north america)", "United States / North America"),
+        (r"(united states and canada|u\.s\.\s*&\s*canada|us\s*&\s*canada|ucan)", "UCAN"),
+        (r"(united states|u\.s\.|^us$|north america)", "United States / North America"),
         (r"(emea|europe|middle east|africa)", "EMEA / Europe"),
-        (r"(apac|asia pacific|asia)", "APAC / Asia Pacific"),
-        (r"(latin america|latam|south america)", "Latin America"),
+        (r"(apac|asia[\s\-]?pacific|asia pacific)", "APAC / Asia Pacific"),
+        (r"(latin america|latam|south america)", "Latin America / LATAM"),
         (r"(china)", "China"),
         (r"(japan)", "Japan"),
         (r"(other|rest of world|international)", "Other / International"),
@@ -1914,8 +1910,9 @@ def _table_kind_for_geo_segment(cols: list[str], first_col_samples: list[str], c
     hay = low_cols + " " + low_rows + " " + context
     geo_signals = [
         "geographic", "geography", "region", "international", "domestic", "united states", "north america",
-        "us & canada", "u.s. & canada", "emea", "latin america", "asia pacific", "apac",
-        "revenues by geography", "revenue by region", "streaming revenue by region",
+        "us & canada", "u.s. & canada", "ucan", "emea", "latin america", "latam", "asia pacific", "apac",
+        "revenues by geography", "revenue by region", "regional streaming revenues",
+        "streaming revenue by region", "streaming revenues by region", "revenues by region",
     ]
     seg_signals = ["segment", "business unit", "operating segment", "by segment", "product line", "reportable segment"]
     geo_score = sum(1 for s in geo_signals if s in hay)
@@ -1929,6 +1926,47 @@ def _table_kind_for_geo_segment(cols: list[str], first_col_samples: list[str], c
     if seg_score >= 1 and seg_score > geo_score:
         return "segment"
     return None
+
+
+def _parse_html_table_to_frame(table: Any) -> pd.DataFrame | None:
+    try:
+        rows: list[list[str]] = []
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["th", "td"])
+            if not cells:
+                continue
+            values = [re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in cells]
+            if any(v for v in values):
+                rows.append(values)
+        if len(rows) < 2:
+            return None
+        max_cols = max(len(r) for r in rows)
+        norm_rows = [r + [""] * (max_cols - len(r)) for r in rows]
+        header_row = norm_rows[0]
+        has_year_header = sum(1 for c in header_row if re.search(r"20\d{2}", c)) >= 2
+        if has_year_header:
+            return pd.DataFrame(norm_rows[1:], columns=header_row)
+        return pd.DataFrame(norm_rows)
+    except Exception:
+        return None
+
+
+def _table_context_text(table: Any) -> str:
+    context_nodes: list[str] = []
+    caption = table.find("caption")
+    if caption:
+        cap = re.sub(r"\s+", " ", caption.get_text(" ", strip=True))
+        if cap:
+            context_nodes.append(cap)
+    prev = table
+    for _ in range(6):
+        prev = prev.find_previous(["p", "div", "h1", "h2", "h3", "h4", "strong", "span"])
+        if not prev:
+            break
+        txt = re.sub(r"\s+", " ", prev.get_text(" ", strip=True))
+        if txt:
+            context_nodes.append(txt)
+    return " | ".join(context_nodes[:6])
 
 
 def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
@@ -1983,8 +2021,8 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
             item7 = extract_section_excerpt(filing_text, "item 7", ["item 7a", "item 8"], max_len=8000)
             fallback_zone = " ".join([item8, notes, item7])
             region_hints = [
-                "us & canada", "u.s. & canada", "united states", "domestic", "emea",
-                "latin america", "asia pacific", "apac", "international",
+                "us & canada", "u.s. & canada", "united states and canada", "ucan", "united states", "domestic", "emea",
+                "latin america", "latam", "asia pacific", "asia-pacific", "apac", "international",
             ]
             for hint in region_hints:
                 rx = re.compile(rf"{re.escape(hint)}[^0-9]{{0,30}}([0-9][0-9,]{{3,}}(?:\.\d+)?)", re.IGNORECASE)
@@ -1999,6 +2037,61 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                 warnings.append("Geographic rows were extracted from text fallback without explicit year headers")
         except Exception as exc:
             warnings.append(f"Text fallback extraction failed: {exc}")
+
+    if not geo_raw and sources:
+        annual = sources[0]
+        try:
+            r = requests.get(annual["url"], headers=SEC_HEADERS, timeout=40)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "lxml")
+            heading_patterns = [
+                "streaming revenues by region",
+                "revenues by region",
+                "regional streaming revenues",
+            ]
+            for node in soup.find_all(["h1", "h2", "h3", "h4", "p", "div", "strong"]):
+                text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).lower()
+                if not text:
+                    continue
+                if not any(p in text for p in heading_patterns):
+                    continue
+                table = node.find_next("table")
+                if table is None:
+                    continue
+                frame = _parse_html_table_to_frame(table)
+                if frame is None or frame.empty:
+                    continue
+                cols = [str(c).strip() for c in frame.columns]
+                year_pos = _extract_year_tokens(cols)
+                if len(year_pos) < 2:
+                    continue
+                first_col = str(cols[0])
+                for _, row in frame.iterrows():
+                    raw_label = str(row.iloc[0]).strip()
+                    if len(raw_label) < 2:
+                        continue
+                    low_label = raw_label.lower()
+                    if any(skip in low_label for skip in ["total", "consolidated", "elimination", "intersegment"]):
+                        continue
+                    for pos, year in year_pos:
+                        value = _parse_numeric(row.iloc[pos] if pos < len(row) else None)
+                        if value is None or value <= 0:
+                            continue
+                        label = _normalize_bucket_label(raw_label)
+                        geo_raw[(year, label)] = max(geo_raw.get((year, label), 0.0), value)
+                if geo_raw:
+                    warnings.append("Geographic rows recovered using heading-to-nearest-table fallback")
+                    break
+        except Exception as exc:
+            warnings.append(f"Heading/table neighborhood fallback failed: {exc}")
+
+    unique_geo_buckets = {bucket for (_, bucket) in geo_raw.keys()}
+    years_with_multiple_regions = {
+        year for year in {y for (y, _) in geo_raw.keys()} if sum(1 for (y, _) in geo_raw.keys() if y == year) >= 3
+    }
+    if geo_raw and (len(unique_geo_buckets) < 3 or not years_with_multiple_regions):
+        warnings.append("Geographic extraction failed validation: insufficient regional rows in a revenue context")
+        geo_raw = {}
 
     def build_rows(raw_map: dict[tuple[int, str], float], label_key: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         if not raw_map:
