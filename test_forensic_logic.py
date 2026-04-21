@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 from forensic_dashboard_app import (
     build_macro_dashboard_payload,
     build_forensic_breakdown,
@@ -12,6 +14,7 @@ from forensic_dashboard_app import (
     classify_earnings_quality,
     classify_persistence,
     compute_forensic_score,
+    extract_geographic_and_segment_disclosures,
     generate_flags,
 )
 
@@ -161,6 +164,59 @@ class ForensicLogicTests(unittest.TestCase):
         self.assertEqual(classify_persistence(1), "one-off")
         self.assertEqual(classify_persistence(2), "repeated")
         self.assertEqual(classify_persistence(3), "persistent")
+
+    def test_netflix_style_geographic_region_table_parses(self):
+        df = pd.DataFrame(
+            {
+                "Region": ["UCAN", "EMEA", "LATAM", "APAC", "Total"],
+                "2024": ["14000", "11000", "4000", "5000", "34000"],
+                "2023": ["13000", "10000", "3500", "4500", "31000"],
+            }
+        )
+        with patch(
+            "forensic_dashboard_app.fetch_latest_annual_filing_table_frames",
+            return_value=([{"frame": df, "context": "The following table summarizes streaming revenues by region"}], [{"url": "x"}], []),
+        ):
+            payload = extract_geographic_and_segment_disclosures("NFLX")
+
+        rows = payload["geographic_revenue_rows"]
+        self.assertGreaterEqual(len(rows), 8)
+        self.assertTrue(any(r["region"] == "UCAN" for r in rows))
+        self.assertTrue(any(r["region"] == "EMEA / Europe" for r in rows))
+        self.assertTrue(any(r["region"] == "Latin America / LATAM" for r in rows))
+        self.assertTrue(any(r["region"] == "APAC / Asia Pacific" for r in rows))
+
+    def test_heading_neighborhood_fallback_extracts_regions(self):
+        html = """
+        <html><body>
+          <h3>The following table summarizes streaming revenues by region</h3>
+          <table>
+            <tr><th>Region</th><th>2024</th><th>2023</th></tr>
+            <tr><td>UCAN</td><td>14000</td><td>13000</td></tr>
+            <tr><td>EMEA</td><td>11000</td><td>10000</td></tr>
+            <tr><td>LATAM</td><td>4000</td><td>3500</td></tr>
+            <tr><td>APAC</td><td>5000</td><td>4500</td></tr>
+          </table>
+        </body></html>
+        """
+
+        class MockResp:
+            def __init__(self, text):
+                self.text = text
+
+            def raise_for_status(self):
+                return None
+
+        with patch(
+            "forensic_dashboard_app.fetch_latest_annual_filing_table_frames",
+            return_value=([], [{"url": "https://example.com/nflx-10k"}], []),
+        ), patch("forensic_dashboard_app.requests.get", return_value=MockResp(html)):
+            payload = extract_geographic_and_segment_disclosures("NFLX")
+
+        self.assertGreaterEqual(len(payload["geographic_revenue_rows"]), 8)
+        self.assertFalse(
+            any("no valid rows were parsed" in w.lower() for w in payload["geographic_summary"].get("warnings", []))
+        )
 
 
 if __name__ == "__main__":
