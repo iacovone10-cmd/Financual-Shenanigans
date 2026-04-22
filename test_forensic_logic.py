@@ -17,6 +17,7 @@ from forensic_dashboard_app import (
     extract_geographic_and_segment_disclosures,
     generate_flags,
 )
+from tax_analysis import analyze_tax_quality
 
 
 class ForensicLogicTests(unittest.TestCase):
@@ -217,6 +218,51 @@ class ForensicLogicTests(unittest.TestCase):
         self.assertFalse(
             any("no valid rows were parsed" in w.lower() for w in payload["geographic_summary"].get("warnings", []))
         )
+
+    def test_tax_quality_detects_book_tax_divergence(self):
+        rows = [
+            {
+                "period": "2022",
+                "pretax_income": 1000,
+                "income_tax_expense": 40,
+                "cash_taxes_paid": 20,
+                "deferred_tax_total": 180,
+                "deferred_tax_assets": 300,
+                "deferred_tax_liabilities": 90,
+            },
+            {
+                "period": "2023",
+                "pretax_income": 1200,
+                "income_tax_expense": 30,
+                "cash_taxes_paid": 15,
+                "deferred_tax_total": 260,
+                "deferred_tax_assets": 380,
+                "deferred_tax_liabilities": 95,
+            },
+            {
+                "period": "2024",
+                "pretax_income": 1250,
+                "income_tax_expense": -5,
+                "cash_taxes_paid": 10,
+                "deferred_tax_total": 310,
+                "deferred_tax_assets": 420,
+                "deferred_tax_liabilities": 110,
+            },
+        ]
+        payload = analyze_tax_quality(rows)
+        self.assertIn("Potential book vs tax divergence", payload["reason_codes"])
+        self.assertIn("High earnings but low cash taxes", payload["reason_codes"])
+        self.assertLess(payload["tax_quality_score"], 60)
+
+    def test_tax_quality_normal_case(self):
+        rows = [
+            {"period": "2022", "pretax_income": 1000, "income_tax_expense": 220, "cash_taxes_paid": 205, "deferred_tax_total": 30},
+            {"period": "2023", "pretax_income": 1100, "income_tax_expense": 235, "cash_taxes_paid": 230, "deferred_tax_total": 25},
+            {"period": "2024", "pretax_income": 1200, "income_tax_expense": 250, "cash_taxes_paid": 245, "deferred_tax_total": 20},
+        ]
+        payload = analyze_tax_quality(rows)
+        self.assertIn(payload["tax_risk_level"], {"Low", "Medium"})
+        self.assertTrue(payload["tax_quality_score"] >= 60)
 
 
 if __name__ == "__main__":
