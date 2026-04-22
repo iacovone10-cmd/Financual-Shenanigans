@@ -18,6 +18,8 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 from flask import Flask, Response, jsonify, render_template_string, request
 
+from tax_analysis import analyze_tax_quality
+
 app = Flask(__name__)
 
 USER_AGENT = "Vincenzo Iacovone vincenzo@email.com"
@@ -303,6 +305,8 @@ APP_HTML = r"""<!doctype html>
       <div class="panel span-4"><div class="section-title"><h2>DSRI & FCF trend</h2><span class="muted">Receivables and free cash flow</span></div><div id="dsriFcfTrendChart" style="height:320px;"></div></div>
 
       <div class="panel span-12"><div class="section-title"><h2>Trend signal board</h2><span class="muted">Automatic deterioration checks</span></div><div class="heat-grid"><div class="heat-card"><div class="heat-label">CFO / NI trend</div><div class="heat-pill" id="trendCfoNi">-</div></div><div class="heat-card"><div class="heat-label">DSRI trend</div><div class="heat-pill" id="trendDsri">-</div></div><div class="heat-card"><div class="heat-label">FCF trend</div><div class="heat-pill" id="trendFcf">-</div></div><div class="heat-card"><div class="heat-label">Trend verdict</div><div class="heat-pill" id="trendOverall">-</div></div><div class="heat-card" style="grid-column: span 2;"><div class="heat-label">Interpretation</div><div class="muted" id="trendNarrative">No trend narrative yet.</div></div></div></div>
+
+      <div class="panel span-12"><div class="section-title"><h2>Tax Quality & Book vs Tax Analysis</h2><span class="muted">ETR, cash taxes, deferred tax and reconciliation risk</span></div><div class="heat-grid"><div class="heat-card"><div class="heat-label">Tax quality score</div><div class="heat-pill" id="taxQualityPill">-</div></div><div class="heat-card"><div class="heat-label">Book vs tax divergence</div><div class="heat-pill" id="taxDivergencePill">-</div></div><div class="heat-card"><div class="heat-label">Tax risk level</div><div class="heat-pill" id="taxRiskPill">-</div></div><div class="heat-card" style="grid-column: span 3;"><div class="heat-label">Reason codes</div><div class="muted" id="taxReasonCodes">No tax diagnostics yet.</div></div></div><div id="taxTrendChart" style="height:320px; margin-top:12px;"></div><div class="flags" id="taxInterpretationBox" style="margin-top:10px;"></div><div style="overflow:auto; margin-top:10px;"><table><thead><tr><th>Period</th><th>Pre-tax income</th><th>Tax expense</th><th>Cash taxes</th><th>ETR</th><th>Cash tax / expense</th><th>Deferred tax</th></tr></thead><tbody id="taxTableBody"></tbody></table></div></div>
 
       <div class="panel span-12"><div class="section-title"><h2>Fundamental quality table</h2><span class="muted">Latest periods</span></div><div style="overflow:auto;"><table><thead><tr><th>Period</th><th>Revenue</th><th>Net income</th><th>CFO</th><th>CFO/NI</th><th>Accruals</th><th>Revenue growth</th><th>AR growth</th><th>DSRI</th></tr></thead><tbody id="qualityTableBody"></tbody></table></div></div>
 
@@ -913,6 +917,53 @@ APP_HTML = r"""<!doctype html>
     document.getElementById('trendNarrative').textContent = trends.narrative || 'No trend narrative yet.';
   }
 
+  function renderTaxAnalysis(tax) {
+    const setPill = (id, label, cls) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = label;
+      el.className = `heat-pill ${cls}`;
+    };
+    if (!tax) {
+      setPill('taxQualityPill', '-', 'neutral');
+      setPill('taxDivergencePill', '-', 'neutral');
+      setPill('taxRiskPill', '-', 'neutral');
+      return;
+    }
+    const qualityScore = tax.tax_quality_score;
+    const divergence = tax.book_tax_divergence_score;
+    const risk = tax.tax_risk_level || 'Low';
+    const riskCls = risk === 'High' ? 'bad' : risk === 'Medium' ? 'warn' : 'ok';
+    const qualityCls = qualityScore < 40 ? 'bad' : qualityScore < 65 ? 'warn' : 'ok';
+    const divCls = divergence >= 65 ? 'bad' : divergence >= 40 ? 'warn' : 'ok';
+    setPill('taxQualityPill', numFmt(qualityScore), qualityCls);
+    setPill('taxDivergencePill', numFmt(divergence), divCls);
+    setPill('taxRiskPill', risk, riskCls);
+
+    document.getElementById('taxReasonCodes').textContent = (tax.reason_codes || []).join(' | ') || 'No tax reason code.';
+    const rows = tax.tax_rows || [];
+    document.getElementById('taxTableBody').innerHTML = rows.map(r => `<tr><td>${r.period || '-'}</td><td>${moneyFmt(r.pre_tax_income)}</td><td>${moneyFmt(r.income_tax_expense)}</td><td>${moneyFmt(r.cash_taxes_paid)}</td><td>${pctFmt(r.etr)}</td><td>${numFmt(r.cash_tax_to_expense)}</td><td>${moneyFmt(r.deferred_tax_total)}</td></tr>`).join('');
+
+    const interp = tax.interpretation || {};
+    const normal = interp.normal_signals || [];
+    const suspicious = interp.suspicious_signals || [];
+    const checks = interp.ten_k_checks || [];
+    document.getElementById('taxInterpretationBox').innerHTML = `
+      ${(normal.length ? `<div class="flag ok"><div class="t">What looks normal</div><div class="muted">${normal.join(' ')}</div></div>` : '')}
+      ${(suspicious.length ? `<div class="flag warn"><div class="t">What looks suspicious</div><div class="muted">${suspicious.join(' ')}</div></div>` : '')}
+      <div class="flag"><div class="t">10-K guidance</div><div class="muted">${checks.join(' ')}</div></div>
+    `;
+
+    const trace1 = { x: (tax.etr_trend || {}).periods || [], y: (tax.etr_trend || {}).values || [], type: 'scatter', mode: 'lines+markers', name: 'ETR', yaxis: 'y1' };
+    const cv = tax.cash_vs_reported_trend || {};
+    const trace2 = { x: cv.periods || [], y: cv.tax_expense || [], type: 'bar', name: 'Tax expense', yaxis: 'y2', opacity: 0.5 };
+    const trace3 = { x: cv.periods || [], y: cv.cash_taxes_paid || [], type: 'bar', name: 'Cash taxes paid', yaxis: 'y2', opacity: 0.5 };
+    const def = tax.deferred_tax_trend || {};
+    const trace4 = { x: def.periods || [], y: def.deferred_tax_total || [], type: 'scatter', mode: 'lines+markers', name: 'Deferred tax', yaxis: 'y2', line: { dash: 'dot' } };
+    const layout = { barmode: 'group', paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', margin: { l: 40, r: 45, t: 10, b: 40 }, font: { color: '#edf2ff' }, xaxis: { gridcolor: 'rgba(255,255,255,0.06)' }, yaxis: { title: 'ETR', tickformat: '.0%' }, yaxis2: { title: 'USD', overlaying: 'y', side: 'right', showgrid: false } };
+    Plotly.newPlot('taxTrendChart', [trace1, trace2, trace3, trace4], layout, { responsive: true, displayModeBar: false });
+  }
+
   async function loadSaved() {
     const res = await fetch('/api/saved');
     const data = await res.json();
@@ -976,6 +1027,7 @@ APP_HTML = r"""<!doctype html>
       renderCfoNiTrend(data.cfo_ni_trend || { years: [], values: [] });
       renderDsriFcfTrend(data.dsri_fcf_trend || { years: [], dsri: [], fcf: [] });
       renderTrendSignals(data.trend_signals || null);
+      renderTaxAnalysis(data.tax_analysis || null);
       renderQualityTable(data.quality_rows || []);
       renderCashflow(data.cashflow_rows || []);
       renderAcqTable(data.acquisition_table || []);
@@ -1548,6 +1600,12 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     tax_benefit = pick_series(fin, ["Tax Effect Of Unusual Items", "Deferred Tax", "Provision For Doubtful Accounts"])
     one_time_gain = pick_series(fin, ["Gain On Sale Of Ppe", "Extraordinary Items"])
     litigation_settlement_gain = pick_series(fin, ["Litigation Expense"])
+    pretax_income = pick_series(fin, ["Pretax Income", "Income Before Tax", "Pretax Income Loss", "Earnings Before Tax"])
+    income_tax_expense = pick_series(fin, ["Tax Provision", "Income Tax Expense", "Provision For Income Taxes"])
+    deferred_tax_total = pick_series(fin, ["Deferred Tax", "Deferred Income Tax", "Deferred Income Tax Expense"])
+    cash_taxes_paid = pick_series(cf, ["Cash Taxes Paid", "Income Tax Paid Supplemental Data", "Taxes Refund Paid"])
+    deferred_tax_assets = pick_series(bs, ["Deferred Tax Assets", "Current Deferred Taxes Assets", "Non Current Deferred Taxes Assets"])
+    deferred_tax_liabilities = pick_series(bs, ["Deferred Tax Liabilities", "Current Deferred Taxes Liabilities", "Non Current Deferred Taxes Liabilities"])
     if rev is None or ni is None or cfo is None:
         return [], {}, [], {}, []
 
@@ -1564,6 +1622,12 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
         "tax_benefit": tax_benefit,
         "one_time_gain": one_time_gain,
         "litigation_settlement_gain": litigation_settlement_gain,
+        "pretax_income": pretax_income,
+        "income_tax_expense": income_tax_expense,
+        "deferred_tax_total": deferred_tax_total,
+        "cash_taxes_paid": cash_taxes_paid,
+        "deferred_tax_assets": deferred_tax_assets,
+        "deferred_tax_liabilities": deferred_tax_liabilities,
     }).dropna(how="all")
     if df.empty:
         return [], {}, [], {}, []
@@ -1619,6 +1683,12 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
             "tax_benefit": safe_float(row.get("tax_benefit")),
             "one_time_gain": safe_float(row.get("one_time_gain")),
             "litigation_settlement_gain": safe_float(row.get("litigation_settlement_gain")),
+            "pretax_income": safe_float(row.get("pretax_income")),
+            "income_tax_expense": safe_float(row.get("income_tax_expense")),
+            "deferred_tax_total": safe_float(row.get("deferred_tax_total")),
+            "cash_taxes_paid": safe_float(row.get("cash_taxes_paid")),
+            "deferred_tax_assets": safe_float(row.get("deferred_tax_assets")),
+            "deferred_tax_liabilities": safe_float(row.get("deferred_tax_liabilities")),
         })
         cash_rows.append({
             "period": period,
@@ -2808,6 +2878,7 @@ def build_reading_checklist() -> list[dict[str, str]]:
         {"title": "Revenue quality", "detail": "Check if receivables, deferred revenue, rebates, returns, and channel language support reported growth."},
         {"title": "Cash flow quality", "detail": "Did working capital absorb cash? Is operating cash supported by sustainable activity?"},
         {"title": "Special items", "detail": "Look for restructuring, asset sales, litigation releases, tax benefits, or recurring 'one-time' adjustments."},
+        {"title": "Tax footnotes", "detail": "Check income tax footnote, deferred tax reconciliation, and valuation allowance changes versus reported earnings."},
         {"title": "Controls and audit signals", "detail": "Read Item 9A and note any weaknesses, remediations, unusual turnover, or vague control language."},
     ]
 
@@ -3552,6 +3623,16 @@ def analyze() -> Any:
         text_signals, text_excerpts = analyze_filing_text(filing_text)
         geo_segment = extract_geographic_and_segment_disclosures(ticker)
         flags, risk, latest_cfo_ni, beneish, forensic_components = generate_flags(quality_rows, text_signals=text_signals)
+        tax_analysis = analyze_tax_quality(quality_rows)
+        tax_reason_codes = tax_analysis.get("reason_codes", [])
+        for reason in tax_reason_codes:
+            if reason == "Tax profile appears broadly normal":
+                continue
+            flags.append({
+                "severity": "Warn" if tax_analysis.get("tax_risk_level") != "High" else "Bad",
+                "title": "Tax quality signal",
+                "detail": reason,
+            })
         forensic_score, _, _ = compute_forensic_score(
             latest_cfo_ni,
             beneish,
@@ -3634,6 +3715,7 @@ def analyze() -> Any:
             "cfo_ni_trend": cfo_ni_trend,
             "dsri_fcf_trend": dsri_fcf_trend,
             "trend_signals": trend_signals,
+            "tax_analysis": tax_analysis,
             "cashflow_rows": cashflow_rows,
             "acquisition_table": acquisition_table,
             "ticker_acquisitions": ticker_acquisitions,
