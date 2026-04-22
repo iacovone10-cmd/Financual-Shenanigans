@@ -77,7 +77,7 @@ APP_HTML = r"""<!doctype html>
       top: 10px;
       z-index: 20;
       display: grid;
-      grid-template-columns: 1.25fr 150px 190px repeat(5, 150px);
+      grid-template-columns: 1.25fr 150px 190px repeat(7, 150px);
       gap: 12px;
       align-items: center;
       margin-bottom: 18px;
