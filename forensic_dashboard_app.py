@@ -1310,6 +1310,32 @@ def safe_pct_change(current: Any, previous: Any) -> float | None:
     return (curr / prev) - 1.0
 
 
+
+
+def safe_sub(a: Any, b: Any) -> float | None:
+    left = safe_float(a)
+    right = safe_float(b)
+    if left is None or right is None:
+        return None
+    return left - right
+
+
+def safe_add(*values: Any) -> float | None:
+    clean = [safe_float(v) for v in values]
+    nums = [v for v in clean if v is not None]
+    if not nums:
+        return None
+    return float(sum(nums))
+
+
+def fmt_pct(v: Any, digits: int = 1) -> str:
+    n = safe_float(v)
+    return "Data unavailable" if n is None else f"{n * 100:.{digits}f}%"
+
+
+def fmt_money(v: Any, digits: int = 2) -> str:
+    n = safe_float(v)
+    return "Data unavailable" if n is None else f"${n:,.{digits}f}"
 def fmt_value(v: Any, digits: int = 2) -> str:
     n = safe_float(v)
     return "-" if n is None else f"{n:.{digits}f}"
@@ -1812,7 +1838,7 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
         "latest_acquisitions": safe_float(df["acquisitions"].iloc[-1]) if "acquisitions" in df.columns and len(df) else None,
         "avg_acquisitions": safe_float(df["acquisitions"].tail(4).mean()) if "acquisitions" in df.columns else None,
         "acq_to_cfo": safe_float(
-            (abs(latest_acq) / abs(latest_cfo))
+            safe_div(safe_abs(latest_acq), safe_abs(latest_cfo))
             if (latest_acq := safe_float(df["acquisitions"].iloc[-1])) is not None
             and (latest_cfo := safe_float(df["cfo"].iloc[-1])) not in (None, 0)
             else None
@@ -2271,7 +2297,7 @@ def build_forensic_components(
         cfo_ni = safe_float(row.get("cfo_ni"))
         if ni in (None, 0) or cfo is None:
             continue
-        mismatch = (abs(ni - cfo) / abs(ni) > 0.30) or (cfo_ni is not None and cfo_ni < 0.9)
+        mismatch = (safe_div(safe_abs(safe_sub(ni, cfo)), safe_abs(ni)) or 0) > 0.30 or (cfo_ni is not None and cfo_ni < 0.9)
         if mismatch:
             mismatch_years += 1
             if row is quality_rows[-1]:
@@ -2309,8 +2335,8 @@ def build_forensic_components(
         baseline = clean[:-1]
         mean = pd.Series(baseline).mean()
         std = pd.Series(baseline).std(ddof=0) or 0.0
-        shock_threshold = abs(mean) + max(0.20, 1.5 * std)
-        is_shock = abs(latest) > shock_threshold
+        shock_threshold = (safe_abs(mean) or 0.0) + max(0.20, 1.5 * (safe_float(std) or 0.0))
+        is_shock = (safe_abs(latest) or 0.0) > (safe_float(shock_threshold) or 0.0)
         deterioration = (label in {"receivables", "inventory"} and latest > 0) or (label == "payables" and latest < 0)
         if is_shock and deterioration:
             wc_shocks += 1
@@ -2503,11 +2529,11 @@ def build_cashflow_flags(cashflow_rows: list[dict[str, Any]], acq_metrics: dict[
         flags.append({"severity": "Warn", "title": "Negative free cash flow", "detail": "Operating cash flow does not cover capital expenditures in the latest period."})
     if acq_to_cfo is not None and acq_to_cfo > 0.5:
         flags.append({"severity": "Warn", "title": "Acquisitions large relative to CFO", "detail": "Acquisition cash outlays are a large share of operating cash flow. Watch for roll-up distortion."})
-    if cfo is not None and acquisitions is not None and abs(acquisitions) > abs(cfo):
+    if safe_abs(acquisitions) is not None and safe_abs(cfo) is not None and (safe_abs(acquisitions) > safe_abs(cfo)):
         flags.append({"severity": "Bad", "title": "Acquisitions exceed CFO", "detail": "The company is spending more on acquisitions than it generates in operating cash flow."})
     if cfo_ni is not None and cfo_ni > 1.8 and fcf is not None and fcf < 0:
         flags.append({"severity": "Warn", "title": "Strong CFO but weak free cash flow", "detail": "Cash conversion looks strong, but reinvestment needs or deal spending absorb the benefit."})
-    if capex is not None and cfo is not None and abs(capex) > abs(cfo) * 0.8:
+    if safe_abs(capex) is not None and safe_abs(cfo) is not None and (safe_abs(capex) > safe_abs(cfo) * 0.8):
         flags.append({"severity": "Warn", "title": "Heavy capital intensity", "detail": "CapEx consumes most of operating cash flow. Check sustainability of free cash flow."})
     return flags
 
@@ -2629,7 +2655,7 @@ def _parse_numeric(v: Any) -> float | None:
         return None
     try:
         val = float(cleaned)
-        return -abs(val) if neg else val
+        return -(safe_abs(val) or 0.0) if neg else val
     except Exception:
         return None
 
@@ -3000,7 +3026,7 @@ def extract_geographic_and_segment_disclosures(ticker: str) -> dict[str, Any]:
                 disclosed_total = totals.get(year)
                 filing_total = totals_by_year.get(year)
                 if disclosed_total and filing_total and filing_total > 0:
-                    gap = abs(disclosed_total - filing_total) / filing_total
+                    gap = safe_div(safe_abs(safe_sub(disclosed_total, filing_total)), filing_total)
                     if gap > 0.2:
                         local_warnings.append(
                             f"Regional rows for {year} differ materially from disclosed total revenue (gap {gap * 100:.1f}%)"
