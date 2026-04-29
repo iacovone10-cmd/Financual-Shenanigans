@@ -18,8 +18,6 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from tax_analysis import analyze_tax_quality
-
 app = Flask(__name__)
 
 USER_AGENT = "Vincenzo Iacovone vincenzo@email.com"
@@ -1296,6 +1294,22 @@ def safe_abs(x: Any) -> float | None:
     return None if n is None else abs(n)
 
 
+def safe_div(a: Any, b: Any) -> float | None:
+    num = safe_float(a)
+    den = safe_float(b)
+    if num is None or den in (None, 0):
+        return None
+    return num / den
+
+
+def safe_pct_change(current: Any, previous: Any) -> float | None:
+    curr = safe_float(current)
+    prev = safe_float(previous)
+    if curr is None or prev in (None, 0):
+        return None
+    return (curr / prev) - 1.0
+
+
 def fmt_value(v: Any, digits: int = 2) -> str:
     n = safe_float(v)
     return "-" if n is None else f"{n:.{digits}f}"
@@ -1874,7 +1888,8 @@ def analyze_inventory_quality_detailed(quality_rows: list[dict[str, Any]], wc_ro
     return out
 
 
-def analyze_receivables_quality(quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def analyze_receivables_quality(data: Any) -> dict[str, Any]:
+    quality_rows = data if isinstance(data, list) else (data.get("quality_rows", []) if isinstance(data, dict) else [])
     out = {"risk_level": "Low", "score": 0, "reason_codes": [], "metrics": {}, "proxy_based_analysis": False, "interpretation": {}}
     if len(quality_rows) < 2:
         return out
@@ -1985,13 +2000,76 @@ def _severity_to_points(severity: str) -> int:
 
 
 def _ratio(n: Any, d: Any) -> float | None:
-    num, den = safe_float(n), safe_float(d)
-    if num is None or den in (None, 0):
-        return None
-    return num / den
+    return safe_div(n, d)
 
 
-def analyze_inventory_quality(quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def analyze_tax_quality(data: Any, statutory_rate: float = 0.21) -> dict[str, Any]:
+    quality_rows = data if isinstance(data, list) else (data.get("quality_rows", []) if isinstance(data, dict) else [])
+    rows = quality_rows[-6:] if quality_rows else []
+    if not rows:
+        return {"etr": None, "cash_tax_ratio": None, "flags": ["Data unavailable"], "score": None, "tax_quality_score": None, "tax_risk_level": "Unknown", "reason_codes": ["Data unavailable"]}
+
+    tax_rows: list[dict[str, Any]] = []
+    etr_values: list[float] = []
+    flags: list[str] = []
+    low_etr_hits = 0
+    cash_gap_hits = 0
+    deferred_hits = 0
+    for row in rows:
+        pretax = safe_float(row.get("pretax_income"))
+        tax_expense = safe_float(row.get("income_tax_expense"))
+        cash_taxes_paid = safe_float(row.get("cash_taxes_paid"))
+        deferred_total = safe_float(row.get("deferred_tax_total"))
+        etr = safe_div(tax_expense, pretax)
+        cash_ratio = safe_div(safe_abs(cash_taxes_paid), safe_abs(tax_expense))
+        deferred_ratio = safe_div(safe_abs(deferred_total), safe_abs(pretax))
+        if etr is not None:
+            etr_values.append(etr)
+        if pretax is not None and pretax > 0 and etr is not None and etr < 0.10:
+            low_etr_hits += 1
+        if pretax is not None and pretax > 0 and cash_ratio is not None and cash_ratio < 0.6:
+            cash_gap_hits += 1
+        if deferred_ratio is not None and deferred_ratio > 0.2:
+            deferred_hits += 1
+        tax_rows.append({"period": row.get("period"), "etr": etr, "cash_tax_to_expense": cash_ratio, "deferred_ratio_to_pretax": deferred_ratio, "income_tax_expense": tax_expense, "cash_taxes_paid": cash_taxes_paid, "deferred_tax_total": deferred_total})
+
+    latest = tax_rows[-1] if tax_rows else {}
+    latest_etr = safe_float(latest.get("etr"))
+    latest_cash_ratio = safe_float(latest.get("cash_tax_to_expense"))
+    latest_deferred_ratio = safe_float(latest.get("deferred_ratio_to_pretax"))
+
+    if low_etr_hits >= 2 or (latest_etr is not None and latest_etr < statutory_rate * 0.6):
+        flags.append("Low effective tax rate vs statutory baseline")
+    if cash_gap_hits >= 2 or (latest_cash_ratio is not None and latest_cash_ratio < 0.6):
+        flags.append("Cash taxes materially below tax expense")
+    if deferred_hits >= 2 or (latest_deferred_ratio is not None and latest_deferred_ratio > 0.2):
+        flags.append("Heavy reliance on deferred tax items")
+    if not flags:
+        flags.append("No major tax-quality anomalies from available data")
+
+    penalty = 0.0
+    penalty += 25.0 if low_etr_hits >= 2 else 0.0
+    penalty += 20.0 if cash_gap_hits >= 2 else 0.0
+    penalty += 20.0 if deferred_hits >= 2 else 0.0
+    if latest_etr is not None and latest_etr < 0:
+        penalty += 20.0
+    risk_score = round(min(100.0, penalty), 1)
+    quality_score = round(max(0.0, 100.0 - risk_score), 1)
+    risk_level = "High" if risk_score >= 70 else "Medium" if risk_score >= 40 else "Low"
+    return {
+        "etr": latest_etr,
+        "cash_tax_ratio": latest_cash_ratio,
+        "flags": flags,
+        "score": quality_score,
+        "tax_rows": tax_rows,
+        "tax_quality_score": quality_score,
+        "tax_risk_level": risk_level,
+        "reason_codes": flags,
+    }
+
+
+def analyze_inventory_quality(data: Any) -> dict[str, Any]:
+    quality_rows = data if isinstance(data, list) else (data.get("quality_rows", []) if isinstance(data, dict) else [])
     if not quality_rows:
         return {"inventory_quality_score": 0.0, "risk_level": "Low", "reason_codes": ["Insufficient inventory history"], "proxy_based": True}
     rows = quality_rows[-6:]
@@ -3745,6 +3823,7 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
     for ticker in choose_universe(mode):
         try:
             quality_rows, latest_metrics, cashflow_rows, acq_metrics, wc_rows = build_quality_rows(ticker)
+            inventory_analysis = analyze_inventory_quality(quality_rows)
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
             inventory_diag = analyze_inventory_quality_detailed(quality_rows, wc_rows)
             receivables_diag = analyze_receivables_quality(quality_rows)
@@ -3800,7 +3879,8 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "short_reason": ", ".join(list(dict.fromkeys(reasons))[:1]) if reasons else "no major anomaly cluster",
                     "distress_rank": distress_rank,
                 })
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] {ticker}: {e}")
             continue
     rows.sort(key=lambda x: (-x.get("distress_rank", 0), x.get("score", 100)))
     for row in rows:
@@ -4043,7 +4123,17 @@ def analyze() -> Any:
             "top_losers": top_losers,
         })
     except Exception as e:
-        return jsonify({"error": f"Failed to analyze {ticker}: {e}"}), 500
+        print(f"[ERROR] {ticker}: {e}")
+        return jsonify({
+            "ticker": ticker,
+            "error": "Data unavailable",
+            "flags": [],
+            "final_flags": [],
+            "forensic_score": None,
+            "tax_analysis": {"flags": ["Data unavailable"], "score": None},
+            "inventory_quality_analysis": {"risk_level": "Unknown", "signals": ["Data unavailable"], "score": None},
+            "receivables_quality_analysis": {"risk_level": "Unknown", "reason_codes": ["Data unavailable"], "score": None},
+        }), 200
 
 
 @app.route("/api/screener")
