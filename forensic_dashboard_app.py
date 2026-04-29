@@ -302,7 +302,7 @@ APP_HTML = r"""<!doctype html>
     </div>
 
     <div class="grid">
-      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
+      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Forensic View</th><th>Confidence</th><th>Main reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>10-K access</h2><span class="muted">Fast navigation</span></div><div id="filingsBox" class="flags"></div></div>
 
       <div class="panel span-8"><div class="section-title"><h2>Price & trend</h2><span class="muted">Market view</span></div><div id="priceChart" style="height:360px;"></div></div>
@@ -338,6 +338,7 @@ APP_HTML = r"""<!doctype html>
 
       <div class="panel span-6"><div class="section-title"><h2>Forensic scorecard</h2><span class="muted">Key diagnostic metrics</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Comment</th></tr></thead><tbody id="scorecardBody"></tbody></table></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Reading checklist</h2><span class="muted">Qualitative prompts</span></div><div class="flags" id="checklistBox"></div></div>
+      <div class="panel span-12"><div class="section-title"><h2>Forensic Investment View</h2><span class="muted">Based on the available forensic indicators (not financial advice)</span></div><div class="flags" id="forensicInvestmentViewBox"></div></div>
       <div class="panel span-12"><div class="section-title"><h2>Receivables Footnote Review Guide</h2><span class="muted">Practical 10-K checklist</span></div><div class="flags" id="receivablesGuideBox"></div></div>
 
       <div class="panel span-4"><div class="section-title"><h2>10-K text signals</h2><span class="muted">Automatic filing scan</span></div><div style="overflow:auto;"><table><thead><tr><th>Signal</th><th>Hits</th><th>Interpretation</th></tr></thead><tbody id="textSignalsBody"></tbody></table></div></div>
@@ -867,7 +868,7 @@ APP_HTML = r"""<!doctype html>
   function renderScreener(rows) {
     const body = document.getElementById('screenerBody');
     if (!body) return;
-    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.short_reason || r.reason || '-'}</td></tr>`).join('');
+    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.forensic_view || '-'}</td><td>${r.confidence || '-'}</td><td>${r.main_reason || r.short_reason || r.reason || '-'}</td></tr>`).join('');
     document.getElementById('screenCount').textContent = String(rows.length || 0);
     document.getElementById('screenWorst').textContent = rows.length ? numFmt(rows[0].score) : '-';
     const text = rows.flatMap(r => (r.short_reason || r.reason || '').split(',').map(x => x.trim())).filter(Boolean);
@@ -875,6 +876,30 @@ APP_HTML = r"""<!doctype html>
     text.forEach(x => { freq[x] = (freq[x] || 0) + 1; });
     const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
     document.getElementById('screenTheme').textContent = top ? top[0] : '-';
+  }
+
+  function renderForensicInvestmentView(view) {
+    const el = document.getElementById('forensicInvestmentViewBox');
+    if (!el) return;
+    if (!view) {
+      el.innerHTML = '<div class="flag warn"><div class="t">No investment view available</div><div class="muted">Run analysis first.</div></div>';
+      return;
+    }
+    const cls = String(view.forensic_view || '').includes('SELL') || String(view.forensic_view || '').includes('AVOID') ? 'bad' : (String(view.forensic_view || '').includes('BUY') ? 'ok' : 'warn');
+    const reasons = (view.reasons || []).slice(0, 3).map(x => `<li>${x}</li>`).join('');
+    const risks = (view.risks || []).slice(0, 3).map(x => `<li>${x}</li>`).join('');
+    const checks = (view.manual_checks_needed || []).map(x => `<li>${x}</li>`).join('');
+    el.innerHTML = `
+      <div class="flag ${cls}">
+        <div class="t">Recommendation badge: ${view.forensic_view || '-'}</div>
+        <div class="muted">Confidence badge: ${view.confidence || '-'}</div>
+        <div class="muted small" style="margin-top:8px;">${view.disclaimer || 'Based on the available forensic indicators, this is an analytical view only and not financial advice.'}</div>
+      </div>
+      <div class="flag"><div class="t">Reasons</div><ul class="muted">${reasons || '<li>No reasons available.</li>'}</ul></div>
+      <div class="flag warn"><div class="t">Risks / doubts</div><ul class="muted">${risks || '<li>No explicit risks listed.</li>'}</ul></div>
+      <div class="flag"><div class="t">What would change the view</div><div class="muted">${view.what_would_change || '-'}</div></div>
+      <div class="flag"><div class="t">Manual checks needed before acting</div><ul class="muted">${checks || '<li>Validate latest 10-K/10-Q disclosures manually.</li>'}</ul></div>
+    `;
   }
 
   function loadTickerFromScreener(ticker) {
@@ -1093,6 +1118,7 @@ APP_HTML = r"""<!doctype html>
       renderNews(data.news || []);
       renderScorecard(data.scorecard || []);
       renderChecklist(data.reading_checklist || []);
+      renderForensicInvestmentView(data.forensic_investment_view || null);
       renderTextSignals(data.text_signals || []);
       renderExcerpts(data.text_excerpts || []);
       renderSingleExcerpt('item7Box', 'Item 7', data.item7_excerpt);
@@ -3555,6 +3581,78 @@ def build_watchlist_snapshot() -> list[dict[str, Any]]:
     return rows
 
 
+def build_forensic_investment_view(
+    quality_rows: list[dict[str, Any]],
+    cashflow_rows: list[dict[str, Any]],
+    inventory_diag: dict[str, Any],
+    receivables_diag: dict[str, Any],
+    tax_analysis: dict[str, Any],
+    risk_level: str,
+    components: dict[str, Any],
+) -> dict[str, Any]:
+    disclaimer = "Based on the available forensic indicators, this is an analytical view only and not financial advice."
+    if not quality_rows and not cashflow_rows:
+        return {"forensic_view": "INCONCLUSIVE", "confidence": "Low", "main_reason": "Insufficient financial statement data", "reasons": ["Insufficient financial statement data"], "risks": ["Price data can move independently from fundamentals."], "what_would_change": "Add complete income statement, cash flow, and balance sheet history.", "manual_checks_needed": ["Obtain latest 10-K/10-Q financial statements before acting."], "disclaimer": disclaimer}
+    completeness_points = 0
+    completeness_points += 1 if len(quality_rows) >= 3 else 0
+    completeness_points += 1 if len(cashflow_rows) >= 3 else 0
+    completeness_points += 1 if tax_analysis and tax_analysis.get("tax_risk_level") not in {"Unknown", None} else 0
+    completeness_points += 1 if inventory_diag and inventory_diag.get("risk_level") else 0
+    completeness_points += 1 if receivables_diag and receivables_diag.get("risk_level") else 0
+    data_complete = completeness_points >= 4
+    latest = quality_rows[-1] if quality_rows else {}
+    cfo_ni = safe_float(latest.get("cfo_ni"))
+    accruals = safe_float(latest.get("accruals"))
+    net_income = safe_float(latest.get("net_income"))
+    accrual_pressure = (accruals / abs(net_income)) if (accruals is not None and net_income not in (None, 0)) else None
+    tax_risk = (tax_analysis or {}).get("tax_risk_level", "Unknown")
+    inv_risk = (inventory_diag or {}).get("risk_level", "Unknown")
+    ar_risk = (receivables_diag or {}).get("risk_level", "Unknown")
+    non_op_penalty = safe_float(((components or {}).get("non_operating_analysis") or {}).get("penalty")) or 0.0
+    fcf_vals = [safe_float(r.get("fcf")) for r in (cashflow_rows or []) if safe_float(r.get("fcf")) is not None]
+    positive_stable_fcf = len(fcf_vals) >= 3 and all(v > 0 for v in fcf_vals[-3:])
+    weak_fcf = (len(fcf_vals) >= 2 and sum(1 for v in fcf_vals[-3:] if v is not None and v <= 0) >= 2)
+    high_accounting_risk = risk_level == "High" or (cfo_ni is not None and cfo_ni < 1.0 and (accrual_pressure is not None and accrual_pressure > 0.4))
+    view = "HOLD / WATCHLIST"
+    if not data_complete:
+        view = "INCONCLUSIVE"
+    elif high_accounting_risk:
+        view = "AVOID / SELL"
+    elif cfo_ni is not None and cfo_ni >= 1.0 and positive_stable_fcf and (accrual_pressure is None or accrual_pressure <= 0.2) and tax_risk == "Low" and inv_risk == "Low" and ar_risk == "Low" and non_op_penalty <= 0:
+        view = "BUY / ACCUMULATE"
+    elif weak_fcf or (cfo_ni is not None and cfo_ni < 1.0):
+        view = "HOLD / WATCHLIST"
+    if not data_complete and view == "BUY / ACCUMULATE":
+        view = "HOLD / WATCHLIST"
+    if high_accounting_risk and view == "BUY / ACCUMULATE":
+        view = "AVOID / SELL"
+    reasons = [
+        f"Cash conversion (CFO/NI) is {cfo_ni:.2f}." if cfo_ni is not None else "Cash conversion data is limited.",
+        "Recent free cash flow is stable and positive." if positive_stable_fcf else "Free cash flow is volatile or weak.",
+        f"Data completeness is {'good' if data_complete else 'weak'} across core forensic modules.",
+    ]
+    risks = [
+        f"Tax risk level is {tax_risk}.",
+        f"Inventory risk is {inv_risk} and receivables risk is {ar_risk}.",
+        "Non-operating or one-off income may be supporting earnings." if non_op_penalty > 0 else "Limited explicit one-off income support detected in current signals.",
+    ]
+    confidence = "High" if data_complete and view in {"BUY / ACCUMULATE", "AVOID / SELL"} else "Medium" if data_complete else "Low"
+    return {
+        "forensic_view": view,
+        "confidence": confidence,
+        "main_reason": reasons[0],
+        "reasons": reasons[:3],
+        "risks": risks[:3],
+        "what_would_change": "A sustained improvement (or deterioration) in CFO/NI, FCF consistency, tax quality, and working-capital risk signals over multiple filings.",
+        "manual_checks_needed": [
+            "Read latest 10-K and 10-Q footnotes for revenue recognition and reserves.",
+            "Verify debt maturity and refinancing sensitivity.",
+            "Confirm that non-recurring gains are not masking core earnings quality.",
+        ],
+        "disclaimer": disclaimer,
+    }
+
+
 def _safe_pct_change(curr: float | None, prev: float | None) -> float | None:
     if curr is None or prev in (None, 0):
         return None
@@ -3853,6 +3951,7 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
             inventory_diag = analyze_inventory_quality_detailed(quality_rows, wc_rows)
             receivables_diag = analyze_receivables_quality(quality_rows)
+            tax_analysis = analyze_tax_quality(quality_rows)
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
             score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
             inv_penalty = min((safe_float(inventory_analysis.get("inventory_quality_score")) or 0.0) * 0.18, 16.0)
@@ -3880,6 +3979,9 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
             reasons.extend(components.get("reason_tags", [])[:3])
             reasons.extend(components.get("major_reasons", [])[:2])
             reasons.extend((inventory_analysis.get("reason_codes") or [])[:2])
+            forensic_investment_view = build_forensic_investment_view(
+                quality_rows, cashflow_rows, inventory_diag, receivables_diag, tax_analysis, risk, components
+            )
             if reasons:
                 distress_rank = (
                     (100.0 - score)
@@ -3903,6 +4005,9 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "dsri": dsri,
                     "reason": ", ".join(list(dict.fromkeys(reasons))[:3]),
                     "short_reason": ", ".join(list(dict.fromkeys(reasons))[:1]) if reasons else "no major anomaly cluster",
+                    "forensic_view": forensic_investment_view.get("forensic_view"),
+                    "confidence": forensic_investment_view.get("confidence"),
+                    "main_reason": forensic_investment_view.get("main_reason"),
                     "distress_rank": distress_rank,
                 })
         except Exception as e:
@@ -4020,6 +4125,15 @@ def analyze() -> Any:
         trend_signals = build_trend_signals(cfo_ni_trend, dsri_fcf_trend)
         inventory_quality_analysis = analyze_inventory_quality_detailed(quality_rows, working_capital_rows)
         receivables_quality_analysis = analyze_receivables_quality(quality_rows)
+        forensic_investment_view = build_forensic_investment_view(
+            quality_rows,
+            cashflow_rows,
+            inventory_quality_analysis,
+            receivables_quality_analysis,
+            tax_analysis,
+            risk,
+            forensic_components,
+        )
         geo_rows = geo_segment.get("geographic_revenue_rows", []) or []
         seg_rows = geo_segment.get("segment_revenue_rows", []) or []
         if geo_rows and quality_rows:
@@ -4088,6 +4202,7 @@ def analyze() -> Any:
             "receivables_quality_analysis": receivables_quality_analysis,
             "receivables_footnote_guide": receivables_guide,
             "tax_analysis": tax_analysis,
+            "forensic_investment_view": forensic_investment_view,
             "inventory_analysis": inventory_analysis,
             "cashflow_rows": cashflow_rows,
             "acquisition_table": acquisition_table,
