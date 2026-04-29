@@ -22,6 +22,11 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def _safe_abs(value: Any) -> float | None:
+    numeric = _safe_float(value)
+    return None if numeric is None else abs(numeric)
+
+
 def analyze_tax_quality(
     quality_rows: list[dict[str, Any]],
     statutory_rate: float = 0.21,
@@ -50,12 +55,16 @@ def analyze_tax_quality(
             etr_values.append(etr)
 
         cash_to_expense = None
-        if cash_taxes_paid is not None and tax_expense not in (None, 0):
-            cash_to_expense = abs(cash_taxes_paid) / abs(tax_expense)
+        cash_abs = _safe_abs(cash_taxes_paid)
+        tax_expense_abs = _safe_abs(tax_expense)
+        if cash_abs is not None and tax_expense_abs not in (None, 0):
+            cash_to_expense = cash_abs / tax_expense_abs
 
         deferred_ratio_to_pretax = None
-        if deferred_tax_total is not None and pre_tax_income not in (None, 0):
-            deferred_ratio_to_pretax = abs(deferred_tax_total) / abs(pre_tax_income)
+        deferred_abs = _safe_abs(deferred_tax_total)
+        pretax_abs = _safe_abs(pre_tax_income)
+        if deferred_abs is not None and pretax_abs not in (None, 0):
+            deferred_ratio_to_pretax = deferred_abs / pretax_abs
 
         tax_rows.append(
             {
