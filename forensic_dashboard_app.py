@@ -302,7 +302,7 @@ APP_HTML = r"""<!doctype html>
     </div>
 
     <div class="grid">
-      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Forensic View</th><th>Confidence</th><th>Main reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
+      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Quarterly Risk</th><th>Q CFO/NI</th><th>Q DSRI</th><th>Quarterly Main Flag</th><th>Forensic View</th><th>Confidence</th><th>Main reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>10-K access</h2><span class="muted">Fast navigation</span></div><div id="filingsBox" class="flags"></div></div>
 
       <div class="panel span-8"><div class="section-title"><h2>Price & trend</h2><span class="muted">Market view</span></div><div id="priceChart" style="height:360px;"></div></div>
@@ -338,6 +338,15 @@ APP_HTML = r"""<!doctype html>
 
       <div class="panel span-6"><div class="section-title"><h2>Forensic scorecard</h2><span class="muted">Key diagnostic metrics</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Comment</th></tr></thead><tbody id="scorecardBody"></tbody></table></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Reading checklist</h2><span class="muted">Qualitative prompts</span></div><div class="flags" id="checklistBox"></div></div>
+
+
+      <div class="panel span-12"><div class="section-title"><h2>Quarterly Forensic Breakdown</h2><span class="muted">10-Q cadence stress test</span></div>
+        <div class="stats" id="quarterlySummaryCards"></div>
+        <div style="overflow:auto; margin-top:12px;"><table><thead><tr><th>Quarter</th><th>Revenue</th><th>Net Income</th><th>CFO</th><th>CFO/NI</th><th>Accruals</th><th>Revenue QoQ</th><th>AR QoQ</th><th>Inventory QoQ</th><th>DSRI</th><th>Gross Margin</th><th>Risk Notes</th></tr></thead><tbody id="quarterlyBody"></tbody></table></div>
+        <div class="grid" style="margin-top:12px;"><div class="span-6"><div id="quarterlyRevCfoChart" style="height:300px;"></div></div><div class="span-6"><div id="quarterlyAccrualChart" style="height:300px;"></div></div><div class="span-6"><div id="quarterlyArGrowthChart" style="height:300px;"></div></div><div class="span-6"><div id="quarterlyInvGrowthChart" style="height:300px;"></div></div></div>
+        <div class="flags" id="quarterlyFlagPanel" style="margin-top:12px;"></div>
+        <div class="flag" id="quarterlyManualReviewBox" style="margin-top:10px;"></div>
+      </div>
       <div class="panel span-12"><div class="section-title"><h2>Forensic Investment View</h2><span class="muted">Based on the available forensic indicators (not financial advice)</span></div><div class="flags" id="forensicInvestmentViewBox"></div></div>
       <div class="panel span-12"><div class="section-title"><h2>Receivables Footnote Review Guide</h2><span class="muted">Practical 10-K checklist</span></div><div class="flags" id="receivablesGuideBox"></div></div>
 
@@ -868,7 +877,7 @@ APP_HTML = r"""<!doctype html>
   function renderScreener(rows) {
     const body = document.getElementById('screenerBody');
     if (!body) return;
-    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.forensic_view || '-'}</td><td>${r.confidence || '-'}</td><td>${r.main_reason || r.short_reason || r.reason || '-'}</td></tr>`).join('');
+    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.quarterly_risk || '-'}</td><td>${numFmt(r.latest_quarter_cfo_ni)}</td><td>${numFmt(r.latest_quarter_dsri)}</td><td>${r.quarterly_main_flag || '-'}</td><td>${r.forensic_view || '-'}</td><td>${r.confidence || '-'}</td><td>${r.main_reason || r.short_reason || r.reason || '-'}</td></tr>`).join('');
     document.getElementById('screenCount').textContent = String(rows.length || 0);
     document.getElementById('screenWorst').textContent = rows.length ? numFmt(rows[0].score) : '-';
     const text = rows.flatMap(r => (r.short_reason || r.reason || '').split(',').map(x => x.trim())).filter(Boolean);
@@ -876,6 +885,25 @@ APP_HTML = r"""<!doctype html>
     text.forEach(x => { freq[x] = (freq[x] || 0) + 1; });
     const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
     document.getElementById('screenTheme').textContent = top ? top[0] : '-';
+  }
+
+  function renderQuarterlyForensics(q){
+    const cards=document.getElementById('quarterlySummaryCards');
+    const body=document.getElementById('quarterlyBody');
+    const flags=document.getElementById('quarterlyFlagPanel');
+    const manual=document.getElementById('quarterlyManualReviewBox');
+    if(!cards||!body||!flags||!manual) return;
+    const rows=(q&&q.quarterly_rows)||[];
+    const latest=(q&&q.latest_quarter_analysis)||{};
+    cards.innerHTML=[
+      ['Quarterly Risk Score', numFmt(q&&q.quarterly_risk_score)], ['Quarterly Risk Level', (q&&q.quarterly_risk_level)||'Unknown'],
+      ['Latest Quarter CFO/NI', numFmt(latest.cfo_ni)], ['Latest Quarter DSRI', numFmt(latest.dsri)],
+      ['Latest Quarter AR Growth', pctFmt(latest.ar_growth)], ['Latest Quarter Inventory Growth', pctFmt(latest.inventory_growth)]
+    ].map(c=>`<div class="stat"><div class="label">${c[0]}</div><div class="value">${c[1]||'-'}</div></div>`).join('');
+    body.innerHTML=rows.map(r=>{const an=(r.risk_notes||[]).length>0;return `<tr style="background:${an?'rgba(248,113,113,0.08)':'transparent'}"><td>${r.period||'-'}</td><td>${moneyFmt(r.revenue)}</td><td>${moneyFmt(r.net_income)}</td><td>${moneyFmt(r.cfo)}</td><td>${numFmt(r.cfo_ni)}</td><td>${moneyFmt(r.accruals)}</td><td>${pctFmt(r.revenue_qoq_growth)}</td><td>${pctFmt(r.ar_qoq_growth)}</td><td>${pctFmt(r.inventory_qoq_growth)}</td><td>${numFmt(r.dsri_q_proxy)}</td><td>${pctFmt(r.gross_margin)}</td><td>${(r.risk_notes||[]).join('; ')||'-'}</td></tr>`}).join('');
+    const qf=(q&&q.quarterly_flags)||[];
+    flags.innerHTML=qf.length?qf.map(f=>`<div class="flag ${f.severity==='High'?'bad':f.severity==='Medium'?'warn':'ok'}"><div class="t">${f.code||'Signal'} (${f.severity||'Low'})</div><div class="muted">${f.reason||f}</div></div>`).join(''):'<div class="flag ok"><div class="t">No major quarterly anomaly</div></div>';
+    manual.innerHTML=`<div class="t">What to inspect in the 10-Q</div><div class="muted">${((q&&q.manual_review_checks)||[]).join(' • ')}</div>`;
   }
 
   function renderForensicInvestmentView(view) {
@@ -1103,6 +1131,7 @@ APP_HTML = r"""<!doctype html>
       renderInventoryQuality(data.inventory_quality_analysis || null);
       renderReceivablesQuality(data.receivables_quality_analysis || null, data.receivables_footnote_guide || []);
       renderTaxAnalysis(data.tax_analysis || null);
+      renderQuarterlyForensics(data.quarterly_forensics || null);
       renderQualityTable(data.quality_rows || []);
       renderCashflow(data.cashflow_rows || []);
       renderAcqTable(data.acquisition_table || []);
@@ -3942,6 +3971,78 @@ def build_macro_dashboard_payload() -> dict[str, Any]:
     }
 
 
+
+
+def build_quarterly_forensic_rows(ticker: str) -> dict[str, Any]:
+    manual_checks = [
+        "inspect latest 10-Q MD&A for revenue quality", "compare quarterly revenue growth with CFO growth",
+        "inspect accounts receivable and collection commentary", "inspect inventory build-up and demand commentary",
+        "inspect customer concentration and channel inventory", "inspect unusual seasonal explanation",
+        "inspect changes in payment terms", "inspect gross margin pressure",
+        "inspect restructuring or one-off items", "inspect quarter-end sales acceleration",
+    ]
+    try:
+        tk = yf.Ticker(ticker)
+        fin = (tk.quarterly_financials.T if tk.quarterly_financials is not None else pd.DataFrame()).copy()
+        cf = (tk.quarterly_cashflow.T if tk.quarterly_cashflow is not None else pd.DataFrame()).copy()
+        bs = (tk.quarterly_balance_sheet.T if tk.quarterly_balance_sheet is not None else pd.DataFrame()).copy()
+        if fin.empty and cf.empty and bs.empty:
+            return {"quarterly_rows": [], "quarterly_risk_level": "Unknown", "quarterly_flags": ["Quarterly data unavailable"], "manual_review_checks": manual_checks}
+        rev = pick_series(fin, ["Total Revenue", "Operating Revenue", "Revenue"]); ni = pick_series(fin, ["Net Income", "Net Income Common Stockholders"]); gp = pick_series(fin, ["Gross Profit"])
+        cfo = pick_series(cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities", "Total Cash From Operating Activities"]); capex = pick_series(cf, ["Capital Expenditure", "Capital Expenditures"])
+        ar = pick_series(bs, ["Accounts Receivable", "Receivables", "Net Receivables"]); inv = pick_series(bs, ["Inventory", "Inventories"]); pay = pick_series(bs, ["Accounts Payable", "Payables And Accrued Expenses", "Current Payables"])
+        df = pd.DataFrame({"revenue": rev, "net_income": ni, "cfo": cfo, "gross_profit": gp, "capex": capex, "ar": ar, "inventory": inv, "payables": pay}).dropna(how="all").sort_index()
+        rows=[]
+        for i,(idx,row) in enumerate(df.tail(8).iterrows()):
+            prev = df.iloc[i-1] if i>0 and i < len(df) else None
+            r={"period": idx.strftime("%Y-%m-%d") if hasattr(idx,'strftime') else str(idx)}
+            for k in ["revenue","net_income","cfo","ar","inventory","payables","capex"]: r[k]=safe_float(row.get(k))
+            r["cfo_ni"]=safe_div(r.get("cfo"), r.get("net_income")); r["accruals"]=safe_sub(r.get("net_income"), r.get("cfo"))
+            if prev is not None:
+                r["revenue_qoq_growth"] = safe_pct_change(row.get("revenue"), prev.get("revenue"))
+                r["net_income_qoq_growth"] = safe_pct_change(row.get("net_income"), prev.get("net_income"))
+                r["cfo_qoq_growth"] = safe_pct_change(row.get("cfo"), prev.get("cfo"))
+                r["ar_qoq_growth"] = safe_pct_change(row.get("ar"), prev.get("ar"))
+                r["inventory_qoq_growth"] = safe_pct_change(row.get("inventory"), prev.get("inventory"))
+                r["payables_qoq_growth"] = safe_pct_change(row.get("payables"), prev.get("payables"))
+                r["dsri_q_proxy"] = safe_div(safe_div(row.get("ar"), row.get("revenue")), safe_div(prev.get("ar"), prev.get("revenue")))
+            else:
+                r.update({k:None for k in ["revenue_qoq_growth","net_income_qoq_growth","cfo_qoq_growth","ar_qoq_growth","inventory_qoq_growth","payables_qoq_growth","dsri_q_proxy"]})
+            gm = safe_div(row.get("gross_profit"), row.get("revenue")); r["gross_margin"]=gm; r["gross_margin_qoq_change"]=safe_sub(gm, safe_div(prev.get("gross_profit"), prev.get("revenue"))) if prev is not None else None
+            r["fcf"] = safe_sub(r.get("cfo"), safe_abs(r.get("capex")))
+            vals=[r.get(x) for x in ["revenue","net_income","cfo","ar","inventory","payables","cfo_ni","dsri_q_proxy"]]
+            r["data_completeness_score"]=safe_div(sum(1 for v in vals if safe_float(v) is not None), len(vals))
+            rows.append(r)
+        return {"quarterly_rows": rows, "manual_review_checks": manual_checks}
+    except Exception:
+        return {"quarterly_rows": [], "quarterly_risk_level": "Unknown", "quarterly_flags": ["Quarterly data unavailable"], "manual_review_checks": manual_checks}
+
+def analyze_quarterly_forensic_signals(quarterly_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out={"quarterly_risk_score":0,"quarterly_risk_level":"Unknown","quarterly_flags":[],"latest_quarter_analysis":{},"normal_signals":[],"suspicious_signals":[],"manual_review_checks":[]}
+    if not quarterly_rows: out["quarterly_flags"]=["Quarterly data unavailable"]; return out
+    sev_map={"High":3,"Medium":2,"Low":1}
+    for i in range(1,len(quarterly_rows)):
+        c,p=quarterly_rows[i],quarterly_rows[i-1]
+        rg,cg,ng=safe_float(c.get('revenue_qoq_growth')),safe_float(c.get('cfo_qoq_growth')),safe_float(c.get('net_income_qoq_growth'))
+        if rg is not None and cg is not None and rg>0 and cg<0: out['quarterly_flags'].append({"code":"REV_CFO_DIVERGENCE","severity":"High","reason":"Quarterly revenue growth not supported by cash flow","period":c.get('period')})
+        if ng is not None and cg is not None and ng>0 and cg<=0: out['quarterly_flags'].append({"code":"NI_CFO_DIVERGENCE","severity":"High","reason":"Earnings growth not confirmed by operating cash flow","period":c.get('period')})
+        cfo_ni=safe_float(c.get('cfo_ni')); ni=safe_float(c.get('net_income')); cfo=safe_float(c.get('cfo'))
+        if cfo_ni is not None and cfo_ni<1: out['quarterly_flags'].append({"code":"LOW_CASH_CONVERSION","severity":"Medium","reason":"Quarterly earnings are not fully converting into cash","period":c.get('period')})
+        if ni is not None and ni>0 and cfo is not None and cfo<0: out['quarterly_flags'].append({"code":"POS_EARN_NEG_CFO","severity":"High","reason":"Positive earnings with negative operating cash flow","period":c.get('period')})
+    latest=quarterly_rows[-1]; prev=quarterly_rows[-2] if len(quarterly_rows)>1 else {}
+    if safe_float(latest.get('ar_qoq_growth')) is not None and safe_float(latest.get('revenue_qoq_growth')) is not None and safe_float(latest.get('ar_qoq_growth'))-safe_float(latest.get('revenue_qoq_growth'))>0.12: out['quarterly_flags'].append({"code":"AR_SPIKE","severity":"Medium","reason":"Receivables spike suggests possible aggressive revenue recognition","period":latest.get('period')})
+    if safe_float(latest.get('inventory_qoq_growth')) is not None and safe_float(latest.get('revenue_qoq_growth')) is not None and safe_float(latest.get('inventory_qoq_growth'))-safe_float(latest.get('revenue_qoq_growth'))>0.12: out['quarterly_flags'].append({"code":"INV_BUILD","severity":"Medium","reason":"Inventory build-up detected in recent quarter","period":latest.get('period')})
+    if safe_float(latest.get('dsri_q_proxy')) is not None and safe_float(latest.get('dsri_q_proxy'))>1.15: out['quarterly_flags'].append({"code":"DSRI_ELEVATED","severity":"Medium","reason":"Quarterly DSRI elevated","period":latest.get('period')})
+    if safe_float(latest.get('gross_margin_qoq_change')) is not None and safe_float(latest.get('gross_margin_qoq_change'))<0 and (safe_float(latest.get('revenue_qoq_growth')) or 0)>0: out['quarterly_flags'].append({"code":"MARGIN_DECAY","severity":"Medium","reason":"Revenue growth accompanied by margin deterioration","period":latest.get('period')})
+    out['quarterly_risk_score']=sum(sev_map.get(f.get('severity','Low'),1) for f in out['quarterly_flags'])
+    out['quarterly_risk_level']='High' if out['quarterly_risk_score']>=10 else 'Medium' if out['quarterly_risk_score']>=5 else 'Low'
+    out['latest_quarter_analysis']={k:latest.get(k) for k in ['period','cfo_ni','dsri_q_proxy','ar_qoq_growth','inventory_qoq_growth']}
+    out['latest_quarter_analysis']['dsri']=latest.get('dsri_q_proxy')
+    out['suspicious_signals']=[f.get('reason') for f in out['quarterly_flags'][:6]]
+    out['normal_signals']=["Quarterly rows computed with safe-math guards", "Missing fields are retained as '-' without breaking analysis"]
+    out['manual_review_checks']=[]
+    return out
+
 def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
     rows = []
     for ticker in choose_universe(mode):
@@ -3952,6 +4053,8 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
             inventory_diag = analyze_inventory_quality_detailed(quality_rows, wc_rows)
             receivables_diag = analyze_receivables_quality(quality_rows)
             tax_analysis = analyze_tax_quality(quality_rows)
+            q_payload = build_quarterly_forensic_rows(ticker)
+            q_analysis = analyze_quarterly_forensic_signals(q_payload.get("quarterly_rows", []))
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
             score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
             inv_penalty = min((safe_float(inventory_analysis.get("inventory_quality_score")) or 0.0) * 0.18, 16.0)
@@ -4009,6 +4112,10 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "confidence": forensic_investment_view.get("confidence"),
                     "main_reason": forensic_investment_view.get("main_reason"),
                     "distress_rank": distress_rank,
+                    "quarterly_risk": q_analysis.get("quarterly_risk_level", "Unknown"),
+                    "latest_quarter_cfo_ni": safe_float((q_analysis.get("latest_quarter_analysis") or {}).get("cfo_ni")),
+                    "latest_quarter_dsri": safe_float((q_analysis.get("latest_quarter_analysis") or {}).get("dsri")),
+                    "quarterly_main_flag": ((q_analysis.get("quarterly_flags") or [{}])[0].get("reason") if isinstance((q_analysis.get("quarterly_flags") or [{}])[0], dict) else (q_analysis.get("quarterly_flags") or ["-"])[0]),
                 })
         except Exception as e:
             print(f"[ERROR] {ticker}: {e}")
@@ -4202,6 +4309,7 @@ def analyze() -> Any:
             "receivables_quality_analysis": receivables_quality_analysis,
             "receivables_footnote_guide": receivables_guide,
             "tax_analysis": tax_analysis,
+            "quarterly_forensics": quarterly_analysis,
             "forensic_investment_view": forensic_investment_view,
             "inventory_analysis": inventory_analysis,
             "cashflow_rows": cashflow_rows,
