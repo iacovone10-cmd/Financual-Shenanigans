@@ -99,6 +99,24 @@ APP_HTML = r"""<!doctype html>
       backdrop-filter: blur(8px);
       transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease, background .18s ease;
     }
+    .select {
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      padding-right: 42px;
+      background-image:
+        linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+        linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position:
+        calc(100% - 20px) calc(50% - 3px),
+        calc(100% - 14px) calc(50% - 3px);
+      background-size: 6px 6px, 6px 6px;
+      background-repeat: no-repeat;
+    }
+    .select option {
+      background: #0b1328;
+      color: var(--text);
+    }
     .input:focus, .select:focus, .textarea:focus {
       border-color: rgba(125,211,252,0.45);
       box-shadow: 0 0 0 4px rgba(125,211,252,0.08);
@@ -1807,7 +1825,7 @@ def get_dsri_fcf_trend(quality_rows: list[dict[str, Any]], cashflow_rows: list[d
     return {"years": years, "dsri": dsri_vals, "fcf": fcf_vals}
 
 
-def analyze_inventory_quality(quality_rows: list[dict[str, Any]], wc_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def analyze_inventory_quality_detailed(quality_rows: list[dict[str, Any]], wc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     out = {"risk_level": "Low", "score": 0, "signals": [], "metrics": {}, "normal_notes": [], "suspicious_notes": []}
     if len(quality_rows) < 2:
         out["normal_notes"].append("Not enough periods for multi-year inventory diagnostics.")
@@ -3716,7 +3734,7 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
         try:
             quality_rows, latest_metrics, cashflow_rows, acq_metrics, wc_rows = build_quality_rows(ticker)
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
-            inventory_diag = analyze_inventory_quality(quality_rows, wc_rows)
+            inventory_diag = analyze_inventory_quality_detailed(quality_rows, wc_rows)
             receivables_diag = analyze_receivables_quality(quality_rows)
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
             score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
@@ -3882,7 +3900,7 @@ def analyze() -> Any:
         cfo_ni_trend = get_cfo_ni_trend_from_quality_rows(quality_rows)
         dsri_fcf_trend = get_dsri_fcf_trend(quality_rows, cashflow_rows)
         trend_signals = build_trend_signals(cfo_ni_trend, dsri_fcf_trend)
-        inventory_quality_analysis = analyze_inventory_quality(quality_rows, working_capital_rows)
+        inventory_quality_analysis = analyze_inventory_quality_detailed(quality_rows, working_capital_rows)
         receivables_quality_analysis = analyze_receivables_quality(quality_rows)
         geo_rows = geo_segment.get("geographic_revenue_rows", []) or []
         seg_rows = geo_segment.get("segment_revenue_rows", []) or []
