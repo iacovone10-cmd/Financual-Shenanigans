@@ -305,6 +305,8 @@ APP_HTML = r"""<!doctype html>
       <div class="panel span-4"><div class="section-title"><h2>DSRI & FCF trend</h2><span class="muted">Receivables and free cash flow</span></div><div id="dsriFcfTrendChart" style="height:320px;"></div></div>
 
       <div class="panel span-12"><div class="section-title"><h2>Trend signal board</h2><span class="muted">Automatic deterioration checks</span></div><div class="heat-grid"><div class="heat-card"><div class="heat-label">CFO / NI trend</div><div class="heat-pill" id="trendCfoNi">-</div></div><div class="heat-card"><div class="heat-label">DSRI trend</div><div class="heat-pill" id="trendDsri">-</div></div><div class="heat-card"><div class="heat-label">FCF trend</div><div class="heat-pill" id="trendFcf">-</div></div><div class="heat-card"><div class="heat-label">Trend verdict</div><div class="heat-pill" id="trendOverall">-</div></div><div class="heat-card" style="grid-column: span 2;"><div class="heat-label">Interpretation</div><div class="muted" id="trendNarrative">No trend narrative yet.</div></div></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Inventory Quality Analysis</h2><span class="muted">Build-up & sell-through diagnostics</span></div><div class="flags" id="inventoryQualityBox"></div></div>
+      <div class="panel span-6"><div class="section-title"><h2>Receivables Quality & Credit Risk</h2><span class="muted">AR, DSO, allowance, and collection risk</span></div><div class="flags" id="receivablesQualityBox"></div></div>
 
       <div class="panel span-12"><div class="section-title"><h2>Inventory Quality & Demand Risk</h2><span class="muted">Build-up, turnover, and demand stress checks</span></div><div class="heat-grid"><div class="heat-card"><div class="heat-label">Inventory quality score</div><div class="heat-pill" id="invScorePill">-</div></div><div class="heat-card"><div class="heat-label">Inventory risk level</div><div class="heat-pill" id="invRiskPill">-</div></div><div class="heat-card"><div class="heat-label">Data mode</div><div class="heat-pill" id="invModePill">-</div></div><div class="heat-card" style="grid-column: span 3;"><div class="heat-label">Reason codes</div><div class="muted" id="invReasonCodes">No inventory diagnostics yet.</div></div></div><div id="invTrendChart" style="height:280px; margin-top:12px;"></div><div class="flags" id="invInterpretationBox" style="margin-top:10px;"></div></div>
       <div class="panel span-12"><div class="section-title"><h2>Inventory Footnote Review Guide</h2><span class="muted">Practical 10-K prompts</span></div><div class="flags" id="invFootnoteGuide"></div></div>
@@ -320,6 +322,7 @@ APP_HTML = r"""<!doctype html>
 
       <div class="panel span-6"><div class="section-title"><h2>Forensic scorecard</h2><span class="muted">Key diagnostic metrics</span></div><div style="overflow:auto;"><table><thead><tr><th>Metric</th><th>Value</th><th>Comment</th></tr></thead><tbody id="scorecardBody"></tbody></table></div></div>
       <div class="panel span-6"><div class="section-title"><h2>Reading checklist</h2><span class="muted">Qualitative prompts</span></div><div class="flags" id="checklistBox"></div></div>
+      <div class="panel span-12"><div class="section-title"><h2>Receivables Footnote Review Guide</h2><span class="muted">Practical 10-K checklist</span></div><div class="flags" id="receivablesGuideBox"></div></div>
 
       <div class="panel span-4"><div class="section-title"><h2>10-K text signals</h2><span class="muted">Automatic filing scan</span></div><div style="overflow:auto;"><table><thead><tr><th>Signal</th><th>Hits</th><th>Interpretation</th></tr></thead><tbody id="textSignalsBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>Item 7 excerpt</h2><span class="muted">MD&A sample</span></div><div class="flags" id="item7Box"></div></div>
@@ -967,31 +970,30 @@ APP_HTML = r"""<!doctype html>
     Plotly.newPlot('taxTrendChart', [trace1, trace2, trace3, trace4], layout, { responsive: true, displayModeBar: false });
   }
 
-  function renderInventoryAnalysis(inv) {
-    const setPill = (id, label, cls) => {
-      const el = document.getElementById(id); if (!el) return;
-      el.textContent = label; el.className = `heat-pill ${cls}`;
-    };
+  function renderInventoryQuality(inv) {
+    const el = document.getElementById('inventoryQualityBox');
+    if (!el) return;
     if (!inv) return;
-    const score = inv.inventory_quality_score;
-    const risk = inv.risk_level || 'Low';
-    setPill('invScorePill', numFmt(score), score >= 45 ? 'bad' : score >= 20 ? 'warn' : 'ok');
-    setPill('invRiskPill', risk, risk === 'High' ? 'bad' : risk === 'Medium' ? 'warn' : 'ok');
-    setPill('invModePill', inv.proxy_based ? 'proxy-based' : 'detailed', inv.proxy_based ? 'warn' : 'ok');
-    document.getElementById('invReasonCodes').textContent = (inv.reason_codes || []).join(' | ');
+    const cls = (inv.risk_level || 'Low') === 'High' ? 'bad' : (inv.risk_level || 'Low') === 'Medium' ? 'warn' : 'ok';
     const m = inv.metrics || {};
-    const interp = inv.interpretation || {};
-    document.getElementById('invInterpretationBox').innerHTML = `
-      <div class="flag"><div class="t">Key metrics</div><div class="muted">Inv YoY: ${pctFmt(m.inventory_growth_yoy)} | Rev YoY: ${pctFmt(m.revenue_growth_yoy)} | COGS YoY: ${pctFmt(m.cogs_growth_yoy)} | DIO: ${numFmt(m.dio)} | Turnover: ${numFmt(m.turnover)}</div></div>
-      <div class="flag ok"><div class="t">What looks normal</div><div class="muted">${(interp.normal_signals || []).join(' ') || 'No strong normal signal detected.'}</div></div>
-      <div class="flag warn"><div class="t">What looks suspicious</div><div class="muted">${(interp.suspicious_signals || []).join(' ') || 'No suspicious inventory build-up pattern detected.'}</div></div>
-      <div class="flag"><div class="t">Concise interpretation</div><div class="muted">${interp.concise_interpretation || ''}</div></div>`;
-    document.getElementById('invFootnoteGuide').innerHTML = (inv.footnote_review_guide || []).map(x => `<div class="flag warn"><div class="t">Prompt</div><div class="muted">${x}</div></div>`).join('');
-    const trend = inv.trend || {};
-    const t1 = { x: trend.periods || [], y: trend.inventory_growth || [], type: 'scatter', mode: 'lines+markers', name: 'Inventory growth' };
-    const t2 = { x: trend.periods || [], y: trend.revenue_growth || [], type: 'scatter', mode: 'lines+markers', name: 'Revenue growth' };
-    const layout = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', margin: { l: 40, r: 10, t: 10, b: 40 }, font: { color: '#edf2ff' }, yaxis: { tickformat: '.0%' } };
-    Plotly.newPlot('invTrendChart', [t1, t2], layout, { responsive: true, displayModeBar: false });
+    const sigs = (inv.signals || []).map(s => `<div class="muted small">• ${s}</div>`).join('');
+    el.innerHTML = `<div class="flag ${cls}"><div class="t">Risk level: ${inv.risk_level || 'Low'}</div><div class="muted">Inventory growth: ${pctFmt(m.inventory_growth)} | Revenue growth: ${pctFmt(m.revenue_growth)} | DIO: ${numFmt(m.dio)} | Turnover: ${numFmt(m.inventory_turnover)}</div>${sigs}</div>`;
+  }
+
+  function renderReceivablesQuality(rq, guide) {
+    const el = document.getElementById('receivablesQualityBox');
+    const guideEl = document.getElementById('receivablesGuideBox');
+    if (el && rq) {
+      const cls = (rq.risk_level || 'Low') === 'High' ? 'bad' : (rq.risk_level || 'Low') === 'Medium' ? 'warn' : 'ok';
+      const m = rq.metrics || {};
+      const reasons = (rq.reason_codes || []).map(s => `<div class="muted small">• ${s}</div>`).join('');
+      const proxy = rq.proxy_based_analysis ? `<div class="muted small">Proxy-based analysis: allowance for doubtful accounts data unavailable.</div>` : '';
+      el.innerHTML = `<div class="flag ${cls}"><div class="t">Risk level: ${rq.risk_level || 'Low'}</div><div class="muted">AR growth: ${pctFmt(m.ar_growth)} | Revenue growth: ${pctFmt(m.revenue_growth)} | DSO: ${numFmt(m.dso)} | AR/Revenue: ${numFmt(m.ar_to_revenue)} | Allowance ratio: ${pctFmt(m.allowance_ratio)}</div>${proxy}${reasons}<div class="muted small">Normal: ${(rq.interpretation || {}).normal || '-'}</div><div class="muted small">Suspicious: ${(rq.interpretation || {}).suspicious || '-'}</div></div>`;
+    }
+    if (guideEl) {
+      const items = (guide || []).map(g => `<div class="flag"><div class="t">${g.title}</div><div class="muted">${g.detail}</div></div>`).join('');
+      guideEl.innerHTML = items;
+    }
   }
 
   async function loadSaved() {
@@ -1057,7 +1059,8 @@ APP_HTML = r"""<!doctype html>
       renderCfoNiTrend(data.cfo_ni_trend || { years: [], values: [] });
       renderDsriFcfTrend(data.dsri_fcf_trend || { years: [], dsri: [], fcf: [] });
       renderTrendSignals(data.trend_signals || null);
-      renderInventoryAnalysis(data.inventory_analysis || null);
+      renderInventoryQuality(data.inventory_quality_analysis || null);
+      renderReceivablesQuality(data.receivables_quality_analysis || null, data.receivables_footnote_guide || []);
       renderTaxAnalysis(data.tax_analysis || null);
       renderQualityTable(data.quality_rows || []);
       renderCashflow(data.cashflow_rows || []);
@@ -1616,7 +1619,12 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     acquisitions = pick_series(cf, ["Acquisitions Net", "Net Business Purchase And Sale", "Purchase Of Business", "Acquisition Of Business"])
     ar = pick_series(bs, ["Accounts Receivable", "Receivables", "Net Receivables"])
     inv = pick_series(bs, ["Inventory", "Inventories"])
+    finished_goods = pick_series(bs, ["Finished Goods", "Finished Goods Inventory"])
+    raw_materials = pick_series(bs, ["Raw Materials", "Raw Material"])
+    wip_inventory = pick_series(bs, ["Work In Process", "Work In Progress"])
     payables = pick_series(bs, ["Accounts Payable", "Payables And Accrued Expenses", "Current Payables"])
+    cogs = pick_series(fin, ["Cost Of Revenue", "Cost Of Goods Sold", "Cost Of Goods And Services Sold"])
+    allowance = pick_series(bs, ["Allowance For Doubtful Accounts", "Allowance For Doubtful Accounts Receivable", "Allowance For Bad Debts"])
     ca = pick_series(bs, ["Current Assets"])
     ppe = pick_series(bs, ["Net PPE", "Property Plant Equipment", "Gross PPE"])
     ta = pick_series(bs, ["Total Assets"])
@@ -1645,6 +1653,8 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     df = pd.DataFrame({
         "revenue": rev, "cogs": cogs, "gross_profit": gross_profit, "net_income": ni, "cfo": cfo, "capex": capex, "acquisitions": acquisitions,
         "ar": ar, "inventory": inv, "payables": payables, "current_assets": ca, "ppe": ppe,
+        "finished_goods": finished_goods, "raw_materials": raw_materials, "wip_inventory": wip_inventory,
+        "cogs": cogs, "allowance": allowance,
         "total_assets": ta, "dep": dep, "sga": sga, "current_liabilities": cl, "long_term_debt": ltd,
         "other_income": other_income,
         "non_operating_income": non_operating_income,
@@ -1673,6 +1683,11 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     df["inventory_growth"] = df["inventory"].pct_change() if "inventory" in df else None
     df["payables_growth"] = df["payables"].pct_change() if "payables" in df else None
     df["dsri"] = ((df["ar"] / df["revenue"]) / (df["ar"].shift(1) / df["revenue"].shift(1))) if "ar" in df else None
+    df["dio"] = ((df["inventory"] / df["cogs"]) * 365.0) if all(c in df.columns for c in ["inventory", "cogs"]) else None
+    df["inventory_turnover"] = (df["cogs"] / df["inventory"]) if all(c in df.columns for c in ["inventory", "cogs"]) else None
+    df["ar_to_revenue"] = (df["ar"] / df["revenue"]) if all(c in df.columns for c in ["ar", "revenue"]) else None
+    df["dso"] = ((df["ar"] / df["revenue"]) * 365.0) if all(c in df.columns for c in ["ar", "revenue"]) else None
+    df["allowance_ratio"] = (df["allowance"].abs() / df["ar"]) if all(c in df.columns for c in ["allowance", "ar"]) else None
     df["aqi"] = None
     if all(c in df.columns for c in ["current_assets", "ppe", "total_assets"]):
         num = 1 - ((df["current_assets"] + df["ppe"]) / df["total_assets"])
@@ -1722,6 +1737,11 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
             "litigation_settlement_gain": safe_float(row.get("litigation_settlement_gain")),
             "pretax_income": safe_float(row.get("pretax_income")),
             "income_tax_expense": safe_float(row.get("income_tax_expense")),
+            "cogs": safe_float(row.get("cogs")),
+            "allowance": safe_float(row.get("allowance")),
+            "dso": safe_float(row.get("dso")),
+            "ar_to_revenue": safe_float(row.get("ar_to_revenue")),
+            "allowance_ratio": safe_float(row.get("allowance_ratio")),
             "deferred_tax_total": safe_float(row.get("deferred_tax_total")),
             "cash_taxes_paid": safe_float(row.get("cash_taxes_paid")),
             "deferred_tax_assets": safe_float(row.get("deferred_tax_assets")),
@@ -1743,6 +1763,11 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
             "ar_growth": safe_float(row.get("ar_growth")),
             "inventory_growth": safe_float(row.get("inventory_growth")),
             "payables_growth": safe_float(row.get("payables_growth")),
+            "finished_goods": safe_float(row.get("finished_goods")),
+            "raw_materials": safe_float(row.get("raw_materials")),
+            "wip_inventory": safe_float(row.get("wip_inventory")),
+            "dio": safe_float(row.get("dio")),
+            "inventory_turnover": safe_float(row.get("inventory_turnover")),
         })
 
     latest = rows[-1] if rows else {}
@@ -1780,6 +1805,90 @@ def get_dsri_fcf_trend(quality_rows: list[dict[str, Any]], cashflow_rows: list[d
         dsri_vals.append(safe_float(row.get("dsri")))
         fcf_vals.append(fcf_map.get(year))
     return {"years": years, "dsri": dsri_vals, "fcf": fcf_vals}
+
+
+def analyze_inventory_quality(quality_rows: list[dict[str, Any]], wc_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out = {"risk_level": "Low", "score": 0, "signals": [], "metrics": {}, "normal_notes": [], "suspicious_notes": []}
+    if len(quality_rows) < 2:
+        out["normal_notes"].append("Not enough periods for multi-year inventory diagnostics.")
+        return out
+    last, prev = quality_rows[-1], quality_rows[-2]
+    rev_g, inv_g = safe_float(last.get("revenue_growth")), safe_float(last.get("inventory_growth"))
+    dio, dio_prev = safe_float(last.get("dio")), safe_float(prev.get("dio"))
+    turn, turn_prev = safe_float(last.get("inventory_turnover")), safe_float(prev.get("inventory_turnover"))
+    fg_last = safe_float((wc_rows[-1] if wc_rows else {}).get("finished_goods"))
+    fg_prev = safe_float((wc_rows[-2] if len(wc_rows) >= 2 else {}).get("finished_goods"))
+    fg_growth = ((fg_last / fg_prev) - 1.0) if fg_last is not None and fg_prev not in (None, 0) else None
+    div_hits = 0
+    if inv_g is not None and rev_g is not None and inv_g > rev_g + 0.10:
+        out["signals"].append("Inventory growth is materially above revenue growth (inventory build-up risk).")
+        out["score"] += 2
+        div_hits += 1
+    if fg_growth is not None and rev_g is not None and fg_growth > rev_g + 0.10:
+        out["signals"].append("Finished goods are building faster than sales growth (possible weak demand masking).")
+        out["score"] += 1
+    if dio is not None and dio_prev is not None and dio > dio_prev * 1.10:
+        out["signals"].append("DIO increased materially, indicating slower inventory conversion.")
+        out["score"] += 1
+        div_hits += 1
+    if turn is not None and turn_prev is not None and turn < turn_prev * 0.90:
+        out["signals"].append("Inventory turnover declined versus prior year.")
+        out["score"] += 1
+    if div_hits >= 2:
+        out["signals"].append("Negative inventory divergence is persistent across multiple indicators.")
+        out["score"] += 1
+    out["risk_level"] = "High" if out["score"] >= 4 else "Medium" if out["score"] >= 2 else "Low"
+    out["metrics"] = {"inventory_growth": inv_g, "revenue_growth": rev_g, "finished_goods_growth": fg_growth, "dio": dio, "inventory_turnover": turn}
+    if out["score"] == 0:
+        out["normal_notes"].append("Inventory growth and sell-through metrics are broadly aligned with revenue.")
+    else:
+        out["suspicious_notes"].append("Inventory metrics show potential earnings-quality pressure from production/sell-through mismatch.")
+    return out
+
+
+def analyze_receivables_quality(quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out = {"risk_level": "Low", "score": 0, "reason_codes": [], "metrics": {}, "proxy_based_analysis": False, "interpretation": {}}
+    if len(quality_rows) < 2:
+        return out
+    last, prev = quality_rows[-1], quality_rows[-2]
+    ar_g, rev_g = safe_float(last.get("ar_growth")), safe_float(last.get("revenue_growth"))
+    dso, dso_prev = safe_float(last.get("dso")), safe_float(prev.get("dso"))
+    ar_rev = safe_float(last.get("ar_to_revenue"))
+    allow_ratio, allow_prev = safe_float(last.get("allowance_ratio")), safe_float(prev.get("allowance_ratio"))
+    cfo_ni = safe_float(last.get("cfo_ni"))
+    if ar_g is not None and rev_g is not None and ar_g > rev_g + 0.08:
+        out["score"] += 2; out["reason_codes"].append("Accounts receivable growing faster than revenue")
+    if dso is not None and dso_prev is not None and dso > dso_prev * 1.08:
+        out["score"] += 1; out["reason_codes"].append("DSO increasing materially")
+    if allow_ratio is None:
+        out["proxy_based_analysis"] = True
+    else:
+        if ar_g is not None and ar_g > 0.05 and allow_ratio < 0.015:
+            out["score"] += 1; out["reason_codes"].append("Low allowance for doubtful accounts relative to receivables")
+        if allow_prev is not None and allow_ratio < allow_prev and ar_g is not None and ar_g > 0:
+            out["score"] += 1; out["reason_codes"].append("Allowance not keeping pace with receivables growth")
+        if allow_prev is not None and allow_ratio > allow_prev * 1.35:
+            out["score"] += 1; out["reason_codes"].append("Sudden increase in allowance may indicate prior underestimation")
+    if rev_g is not None and rev_g > 0 and cfo_ni is not None and cfo_ni < 0.9 and ar_g is not None and ar_g > 0.08:
+        out["score"] += 2; out["reason_codes"].append("Potential aggressive revenue recognition")
+    last4 = quality_rows[-4:]
+    deteriorations = 0
+    for row in last4:
+        rg, ag = safe_float(row.get("revenue_growth")), safe_float(row.get("ar_growth"))
+        d = safe_float(row.get("dso"))
+        if rg is not None and ag is not None and ag > rg + 0.05:
+            deteriorations += 1
+        if dso is not None and d is not None and d >= dso_prev if dso_prev is not None else False:
+            deteriorations += 0
+    if deteriorations >= 2:
+        out["score"] += 1; out["reason_codes"].append("Multi-year deterioration in receivables quality")
+    out["risk_level"] = "High" if out["score"] >= 6 else "Medium" if out["score"] >= 3 else "Low"
+    out["metrics"] = {"ar_growth": ar_g, "revenue_growth": rev_g, "dso": dso, "ar_to_revenue": ar_rev, "allowance_ratio": allow_ratio}
+    out["interpretation"] = {
+        "normal": "Collection profile appears stable." if out["score"] <= 1 else "Some collection pressure is visible.",
+        "suspicious": " | ".join(out["reason_codes"][:3]) if out["reason_codes"] else "No material receivables anomalies triggered.",
+    }
+    return out
 
 
 def build_trend_signals(cfo_ni_trend: dict[str, list[Any]], dsri_fcf_trend: dict[str, list[Any]]) -> dict[str, str]:
@@ -2974,6 +3083,18 @@ def build_reading_checklist() -> list[dict[str, str]]:
     ]
 
 
+def build_receivables_footnote_review_guide() -> list[dict[str, str]]:
+    return [
+        {"title": "Allowance methodology", "detail": "Inspect how management estimates expected credit losses and whether assumptions changed."},
+        {"title": "AR aging schedule", "detail": "Check aging buckets for migration toward older receivables."},
+        {"title": "Bad debt expense trend", "detail": "Compare bad debt expense trend with receivable growth and macro conditions."},
+        {"title": "AR growth vs revenue", "detail": "If AR is consistently outpacing revenue, investigate cut-off/channel stuffing risk."},
+        {"title": "Write-offs vs allowance", "detail": "Check if write-offs are rising faster than reserves."},
+        {"title": "Customer concentration", "detail": "Assess whether credit risk is concentrated in a few counterparties."},
+        {"title": "Credit terms", "detail": "Look for disclosures of looser payment terms used to support sales."},
+    ]
+
+
 def compute_forensic_score(
     cfo_ni: float | None,
     beneish: float | None,
@@ -3593,9 +3714,10 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
     rows = []
     for ticker in choose_universe(mode):
         try:
-            quality_rows, latest_metrics, cashflow_rows, acq_metrics, _ = build_quality_rows(ticker)
+            quality_rows, latest_metrics, cashflow_rows, acq_metrics, wc_rows = build_quality_rows(ticker)
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
-            inventory_analysis = analyze_inventory_quality(quality_rows)
+            inventory_diag = analyze_inventory_quality(quality_rows, wc_rows)
+            receivables_diag = analyze_receivables_quality(quality_rows)
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
             score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
             inv_penalty = min((safe_float(inventory_analysis.get("inventory_quality_score")) or 0.0) * 0.18, 16.0)
@@ -3616,6 +3738,10 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                 reasons.append("non-operating support")
             if components.get("mismatch_classification") == "persistent":
                 reasons.append("persistent NI/CFO divergence")
+            if inventory_diag.get("risk_level") in {"Medium", "High"}:
+                reasons.append("inventory risk")
+            if receivables_diag.get("risk_level") in {"Medium", "High"}:
+                reasons.append("receivables risk")
             reasons.extend(components.get("reason_tags", [])[:3])
             reasons.extend(components.get("major_reasons", [])[:2])
             reasons.extend((inventory_analysis.get("reason_codes") or [])[:2])
@@ -3627,6 +3753,8 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     + min(safe_float(components.get("penalties")) or 0.0, 15.0)
                     + min(safe_float(components.get("persistence_penalty")) or 0.0, 10.0)
                     + min((safe_float(components.get("persistent_events")) or 0.0) * 3.0, 9.0)
+                    + (6 if inventory_diag.get("risk_level") == "High" else 3 if inventory_diag.get("risk_level") == "Medium" else 0)
+                    + (6 if receivables_diag.get("risk_level") == "High" else 3 if receivables_diag.get("risk_level") == "Medium" else 0)
                     + min(safe_float(components.get("text_alignment_boost")) or 0.0, 6.0)
                 )
                 rows.append({
@@ -3714,6 +3842,7 @@ def analyze() -> Any:
         news = get_news_google_rss(f"{ticker} stock OR global economy OR inflation OR interest rates", limit=8)
         scorecard = build_scorecard(latest_metrics)
         reading_checklist = build_reading_checklist()
+        receivables_guide = build_receivables_footnote_review_guide()
         filing_text = fetch_latest_10k_text(ticker)
         text_signals, text_excerpts = analyze_filing_text(filing_text)
         geo_segment = extract_geographic_and_segment_disclosures(ticker)
@@ -3753,6 +3882,8 @@ def analyze() -> Any:
         cfo_ni_trend = get_cfo_ni_trend_from_quality_rows(quality_rows)
         dsri_fcf_trend = get_dsri_fcf_trend(quality_rows, cashflow_rows)
         trend_signals = build_trend_signals(cfo_ni_trend, dsri_fcf_trend)
+        inventory_quality_analysis = analyze_inventory_quality(quality_rows, working_capital_rows)
+        receivables_quality_analysis = analyze_receivables_quality(quality_rows)
         geo_rows = geo_segment.get("geographic_revenue_rows", []) or []
         seg_rows = geo_segment.get("segment_revenue_rows", []) or []
         if geo_rows and quality_rows:
@@ -3817,6 +3948,9 @@ def analyze() -> Any:
             "cfo_ni_trend": cfo_ni_trend,
             "dsri_fcf_trend": dsri_fcf_trend,
             "trend_signals": trend_signals,
+            "inventory_quality_analysis": inventory_quality_analysis,
+            "receivables_quality_analysis": receivables_quality_analysis,
+            "receivables_footnote_guide": receivables_guide,
             "tax_analysis": tax_analysis,
             "inventory_analysis": inventory_analysis,
             "cashflow_rows": cashflow_rows,
