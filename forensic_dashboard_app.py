@@ -9,6 +9,7 @@ import sqlite3
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -1349,6 +1350,11 @@ def safe_abs(x: Any) -> float | None:
     return None if n is None else abs(n)
 
 
+def safe_abs_or_zero(x: Any) -> float:
+    n = safe_abs(x)
+    return 0.0 if n is None else n
+
+
 def safe_div(a: Any, b: Any) -> float | None:
     num = safe_float(a)
     den = safe_float(b)
@@ -1358,11 +1364,8 @@ def safe_div(a: Any, b: Any) -> float | None:
 
 
 def safe_pct_change(current: Any, previous: Any) -> float | None:
-    curr = safe_float(current)
-    prev = safe_float(previous)
-    if curr is None or prev in (None, 0):
-        return None
-    return (curr / prev) - 1.0
+    ratio = safe_div(current, previous)
+    return safe_sub(ratio, 1.0)
 
 
 
@@ -1381,6 +1384,43 @@ def safe_add(*values: Any) -> float | None:
     if not nums:
         return None
     return float(sum(nums))
+
+
+def safe_gt(a: Any, b: Any) -> bool:
+    aa = safe_float(a)
+    bb = safe_float(b)
+    return False if aa is None or bb is None else aa > bb
+
+
+def safe_lt(a: Any, b: Any) -> bool:
+    aa = safe_float(a)
+    bb = safe_float(b)
+    return False if aa is None or bb is None else aa < bb
+
+
+def safe_fmt_num(x: Any, digits: int = 2) -> str:
+    x = safe_float(x)
+    return "-" if x is None else f"{x:.{digits}f}"
+
+
+def safe_fmt_pct(x: Any) -> str:
+    x = safe_float(x)
+    return "-" if x is None else f"{x * 100:.1f}%"
+
+
+def safe_fmt_money(x: Any) -> str:
+    x = safe_float(x)
+    if x is None:
+        return "-"
+    sign = "-" if x < 0 else ""
+    ax = abs(x)
+    if ax >= 1e12:
+        return f"{sign}${ax/1e12:.2f}T"
+    if ax >= 1e9:
+        return f"{sign}${ax/1e9:.2f}B"
+    if ax >= 1e6:
+        return f"{sign}${ax/1e6:.2f}M"
+    return f"{sign}${ax:.2f}"
 
 
 def fmt_pct(v: Any, digits: int = 1) -> str:
@@ -1805,7 +1845,7 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     df["inventory_turnover"] = (df["cogs"] / df["inventory"]) if all(c in df.columns for c in ["inventory", "cogs"]) else None
     df["ar_to_revenue"] = (df["ar"] / df["revenue"]) if all(c in df.columns for c in ["ar", "revenue"]) else None
     df["dso"] = ((df["ar"] / df["revenue"]) * 365.0) if all(c in df.columns for c in ["ar", "revenue"]) else None
-    df["allowance_ratio"] = (df["allowance"].abs() / df["ar"]) if all(c in df.columns for c in ["allowance", "ar"]) else None
+    df["allowance_ratio"] = (df["allowance"].apply(safe_abs) / df["ar"]) if all(c in df.columns for c in ["allowance", "ar"]) else None
     df["aqi"] = None
     if all(c in df.columns for c in ["current_assets", "ppe", "total_assets"]):
         num = 1 - ((df["current_assets"] + df["ppe"]) / df["total_assets"])
@@ -1817,7 +1857,7 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     df["lvgi"] = (((df["current_liabilities"] + df["long_term_debt"]) / df["total_assets"]) / (((df["current_liabilities"].shift(1) + df["long_term_debt"].shift(1)) / df["total_assets"].shift(1)))) if all(c in df.columns for c in ["current_liabilities", "long_term_debt", "total_assets"]) else None
     avg_assets = (df["total_assets"] + df["total_assets"].shift(1)) / 2 if "total_assets" in df else None
     df["tata"] = ((df["net_income"] - df["cfo"]) / avg_assets) if avg_assets is not None else None
-    df["fcf"] = df["cfo"] - df["capex"].abs() if "capex" in df else None
+    df["fcf"] = df.apply(lambda r: safe_sub(r.get("cfo"), safe_abs(r.get("capex"))), axis=1) if "capex" in df else None
     df["gross_margin"] = (df["gross_profit"] / df["revenue"]) if all(c in df.columns for c in ["gross_profit", "revenue"]) else None
 
     def z(x: Any) -> float:
@@ -3633,7 +3673,7 @@ def build_forensic_investment_view(
     cfo_ni = safe_float(latest.get("cfo_ni"))
     accruals = safe_float(latest.get("accruals"))
     net_income = safe_float(latest.get("net_income"))
-    accrual_pressure = (accruals / abs(net_income)) if (accruals is not None and net_income not in (None, 0)) else None
+    accrual_pressure = safe_div(accruals, safe_abs(net_income)) if (accruals is not None and net_income not in (None, 0)) else None
     tax_risk = (tax_analysis or {}).get("tax_risk_level", "Unknown")
     inv_risk = (inventory_diag or {}).get("risk_level", "Unknown")
     ar_risk = (receivables_diag or {}).get("risk_level", "Unknown")
@@ -4118,7 +4158,8 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "quarterly_main_flag": ((q_analysis.get("quarterly_flags") or [{}])[0].get("reason") if isinstance((q_analysis.get("quarterly_flags") or [{}])[0], dict) else (q_analysis.get("quarterly_flags") or ["-"])[0]),
                 })
         except Exception as e:
-            print(f"[ERROR] {ticker}: {e}")
+            print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
+            traceback.print_exc()
             continue
     rows.sort(key=lambda x: (-x.get("distress_rank", 0), x.get("score", 100)))
     for row in rows:
@@ -4163,6 +4204,62 @@ def build_peer_snapshot(base_ticker: str) -> list[dict[str, Any]]:
     return peers
 
 
+def default_tax_analysis() -> dict[str, Any]:
+    return {
+        "tax_quality_score": None,
+        "book_tax_divergence_score": None,
+        "tax_risk_level": "Unknown",
+        "reason_codes": ["Tax structured fields unavailable from yfinance; inspect 10-K income tax footnote manually."],
+        "tax_rows": [],
+        "interpretation": {"normal_signals": [], "suspicious_signals": [], "ten_k_checks": []},
+        "data_status": "Unavailable",
+    }
+
+
+def default_inventory_analysis() -> dict[str, Any]:
+    return {"risk_level": "Unknown", "signals": ["Data unavailable"], "score": None}
+
+
+def default_receivables_analysis() -> dict[str, Any]:
+    return {"risk_level": "Unknown", "reason_codes": ["Data unavailable"], "score": None}
+
+
+def default_quarterly_analysis() -> dict[str, Any]:
+    return {
+        "quarterly_rows": [],
+        "quarterly_risk_score": None,
+        "quarterly_risk_level": "Unknown",
+        "quarterly_flags": ["Quarterly data unavailable"],
+        "latest_quarter_analysis": {},
+        "normal_signals": [],
+        "suspicious_signals": [],
+        "manual_review_checks": [
+            "Review latest 10-Q MD&A",
+            "Compare quarterly revenue growth with operating cash flow",
+            "Inspect receivables, inventory, and margin commentary",
+        ],
+    }
+
+
+def default_macro_analysis() -> dict[str, Any]:
+    return {}
+
+
+def default_investment_view() -> dict[str, Any]:
+    return {"forensic_view": "INCONCLUSIVE", "confidence": "Low", "supporting_reasons": ["Data unavailable"], "risks": [], "what_would_change_view": []}
+
+
+def build_quarterly_forensic_analysis(ticker: str) -> dict[str, Any]:
+    out = default_quarterly_analysis()
+    payload = build_quarterly_forensic_rows(ticker)
+    rows = payload.get("quarterly_rows", []) if isinstance(payload, dict) else []
+    analyzed = analyze_quarterly_forensic_signals(rows)
+    out.update(analyzed or {})
+    if not out.get("quarterly_rows"):
+        out["quarterly_flags"] = ["Quarterly data unavailable"]
+    return out
+
+
 @app.route("/")
 def home() -> str:
     init_db()
@@ -4182,6 +4279,13 @@ def analyze() -> Any:
         period = "1y"
     if not re.fullmatch(r"[A-Z.\-]{1,10}", ticker):
         return jsonify({"error": "Invalid ticker format."}), 400
+    tax_analysis = default_tax_analysis()
+    inventory_analysis = default_inventory_analysis()
+    inventory_quality_analysis = default_inventory_analysis()
+    receivables_quality_analysis = default_receivables_analysis()
+    quarterly_analysis = default_quarterly_analysis()
+    macro = default_macro_analysis()
+    forensic_investment_view = default_investment_view()
     try:
         info = get_price_chart_and_info(ticker, period=period)
         quality_rows, latest_metrics, cashflow_rows, acq_metrics, working_capital_rows = build_quality_rows(ticker)
@@ -4195,14 +4299,22 @@ def analyze() -> Any:
         text_signals, text_excerpts = analyze_filing_text(filing_text)
         geo_segment = extract_geographic_and_segment_disclosures(ticker)
         flags, risk, latest_cfo_ni, beneish, forensic_components = generate_flags(quality_rows, text_signals=text_signals)
-        inventory_analysis = analyze_inventory_quality(quality_rows)
+        try:
+            inventory_analysis = analyze_inventory_quality(quality_rows)
+        except Exception as e:
+            print(f"[ERROR] {ticker} inventory analysis: {type(e).__name__}: {e}")
+            traceback.print_exc()
         if inventory_analysis.get("risk_level") in {"Medium", "High"}:
             flags.append({
                 "severity": "Bad" if inventory_analysis.get("risk_level") == "High" else "Warn",
                 "title": "Inventory quality & demand risk",
                 "detail": "; ".join((inventory_analysis.get("reason_codes") or [])[:2]),
             })
-        tax_analysis = analyze_tax_quality(quality_rows)
+        try:
+            tax_analysis = analyze_tax_quality(quality_rows)
+        except Exception as e:
+            print(f"[ERROR] {ticker} tax analysis: {type(e).__name__}: {e}")
+            traceback.print_exc()
         tax_reason_codes = tax_analysis.get("reason_codes", [])
         for reason in tax_reason_codes:
             if reason == "Tax profile appears broadly normal":
@@ -4230,17 +4342,34 @@ def analyze() -> Any:
         cfo_ni_trend = get_cfo_ni_trend_from_quality_rows(quality_rows)
         dsri_fcf_trend = get_dsri_fcf_trend(quality_rows, cashflow_rows)
         trend_signals = build_trend_signals(cfo_ni_trend, dsri_fcf_trend)
-        inventory_quality_analysis = analyze_inventory_quality_detailed(quality_rows, working_capital_rows)
-        receivables_quality_analysis = analyze_receivables_quality(quality_rows)
-        forensic_investment_view = build_forensic_investment_view(
-            quality_rows,
-            cashflow_rows,
-            inventory_quality_analysis,
-            receivables_quality_analysis,
-            tax_analysis,
-            risk,
-            forensic_components,
-        )
+        try:
+            inventory_quality_analysis = analyze_inventory_quality_detailed(quality_rows, working_capital_rows)
+        except Exception as e:
+            print(f"[ERROR] {ticker} inventory detailed analysis: {type(e).__name__}: {e}")
+            traceback.print_exc()
+        try:
+            receivables_quality_analysis = analyze_receivables_quality(quality_rows)
+        except Exception as e:
+            print(f"[ERROR] {ticker} receivables analysis: {type(e).__name__}: {e}")
+            traceback.print_exc()
+        try:
+            quarterly_analysis = build_quarterly_forensic_analysis(ticker)
+        except Exception as e:
+            print(f"[ERROR] {ticker} quarterly analysis: {type(e).__name__}: {e}")
+            traceback.print_exc()
+        try:
+            forensic_investment_view = build_forensic_investment_view(
+                quality_rows,
+                cashflow_rows,
+                inventory_quality_analysis,
+                receivables_quality_analysis,
+                tax_analysis,
+                risk,
+                forensic_components,
+            )
+        except Exception as e:
+            print(f"[ERROR] {ticker} forensic investment view: {type(e).__name__}: {e}")
+            traceback.print_exc()
         geo_rows = geo_segment.get("geographic_revenue_rows", []) or []
         seg_rows = geo_segment.get("segment_revenue_rows", []) or []
         if geo_rows and quality_rows:
@@ -4372,7 +4501,8 @@ def analyze() -> Any:
             "top_losers": top_losers,
         })
     except Exception as e:
-        print(f"[ERROR] {ticker}: {e}")
+        print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return jsonify({
             "ticker": ticker,
             "error": "Data unavailable",
