@@ -1792,7 +1792,12 @@ def build_quality_rows(ticker: str) -> tuple[list[dict[str, Any]], dict[str, flo
     acq_metrics = {
         "latest_acquisitions": safe_float(df["acquisitions"].iloc[-1]) if "acquisitions" in df.columns and len(df) else None,
         "avg_acquisitions": safe_float(df["acquisitions"].tail(4).mean()) if "acquisitions" in df.columns else None,
-        "acq_to_cfo": safe_float((abs(df["acquisitions"].iloc[-1]) / abs(df["cfo"].iloc[-1])) if "acquisitions" in df.columns and safe_float(df["cfo"].iloc[-1]) not in (None, 0) else None),
+        "acq_to_cfo": safe_float(
+            (abs(latest_acq) / abs(latest_cfo))
+            if (latest_acq := safe_float(df["acquisitions"].iloc[-1])) is not None
+            and (latest_cfo := safe_float(df["cfo"].iloc[-1])) not in (None, 0)
+            else None
+        ) if "acquisitions" in df.columns and "cfo" in df.columns and len(df) else None,
         "latest_fcf": safe_float(df["fcf"].iloc[-1]) if "fcf" in df.columns and len(df) else None,
     }
     return rows, latest, cash_rows, acq_metrics, wc_rows
