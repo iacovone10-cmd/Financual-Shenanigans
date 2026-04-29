@@ -1291,6 +1291,11 @@ def safe_float(x: Any) -> float | None:
         return None
 
 
+def safe_abs(x: Any) -> float | None:
+    n = safe_float(x)
+    return None if n is None else abs(n)
+
+
 def fmt_value(v: Any, digits: int = 2) -> str:
     n = safe_float(v)
     return "-" if n is None else f"{n:.{digits}f}"
@@ -2103,7 +2108,8 @@ def detect_non_operating_support(quality_rows: list[dict[str, Any]]) -> dict[str
         if row is latest:
             latest_support_total = row_total
 
-    support_ratio = abs(latest_support_total) / abs(ni) if ni not in (None, 0) else None
+    ni_abs = safe_abs(ni)
+    support_ratio = (safe_abs(latest_support_total) / ni_abs) if ni_abs not in (None, 0) else None
     result["latest_support_ratio"] = support_ratio
     result["persistence"] = classify_persistence(yearly_support_hits)
 
@@ -2111,7 +2117,7 @@ def detect_non_operating_support(quality_rows: list[dict[str, Any]]) -> dict[str
         val = safe_float(latest.get(key))
         if val is None or val <= 0:
             continue
-        contribution = abs(val) / abs(ni) if ni not in (None, 0) else 0.0
+        contribution = (safe_abs(val) / ni_abs) if ni_abs not in (None, 0) else 0.0
         if contribution >= 0.1:
             result["signals"].append({
                 "signal": label,
@@ -2314,10 +2320,11 @@ def generate_flags(
             flags.append({"severity": "Ok", "title": "Cash conversion acceptable", "detail": f"Latest CFO/NI is {latest_cfo_ni:.2f}. Cash conversion is not currently signaling distress."})
     accruals, ni = last.get("accruals"), last.get("net_income")
     if accruals is not None and ni not in (None, 0):
-        accrual_ratio = accruals / abs(ni)
-        if accrual_ratio > 0.4:
+        ni_abs = safe_abs(ni)
+        accrual_ratio = accruals / ni_abs if ni_abs not in (None, 0) else None
+        if accrual_ratio is not None and accrual_ratio > 0.4:
             flags.append({"severity": "Bad", "title": "High accrual dependence", "detail": "A large share of earnings is not backed by operating cash flow."})
-        elif accrual_ratio > 0.2:
+        elif accrual_ratio is not None and accrual_ratio > 0.2:
             flags.append({"severity": "Warn", "title": "Moderate accrual pressure", "detail": "Accruals deserve attention versus earnings quality."})
     latest_rg, latest_arg = last.get("revenue_growth"), last.get("ar_growth")
     if latest_rg is not None and latest_arg is not None and latest_arg > latest_rg + 0.10:
@@ -3950,8 +3957,8 @@ def analyze() -> Any:
         )
         grouped_signals = build_grouped_signals(forensic_components, text_signals, flags)
         acquisition_table = [
-            {"metric": "Latest acquisitions cash", "value": fmt_value(abs(acq_metrics.get("latest_acquisitions")) if safe_float(acq_metrics.get("latest_acquisitions")) is not None else None), "comment": "Cash outflow for acquisitions. Displayed as absolute size for readability."},
-            {"metric": "Average acquisitions (4 periods)", "value": fmt_value(abs(acq_metrics.get("avg_acquisitions")) if safe_float(acq_metrics.get("avg_acquisitions")) is not None else None), "comment": "Useful to spot serial acquirers and roll-up patterns."},
+            {"metric": "Latest acquisitions cash", "value": fmt_value(safe_abs(acq_metrics.get("latest_acquisitions"))), "comment": "Cash outflow for acquisitions. Displayed as absolute size for readability."},
+            {"metric": "Average acquisitions (4 periods)", "value": fmt_value(safe_abs(acq_metrics.get("avg_acquisitions"))), "comment": "Useful to spot serial acquirers and roll-up patterns."},
             {"metric": "Acquisitions / CFO", "value": fmt_value(acq_metrics.get("acq_to_cfo")), "comment": "High ratios mean acquisitions materially affect the cash story."},
             {"metric": "Latest free cash flow", "value": fmt_value(acq_metrics.get("latest_fcf")), "comment": "FCF = CFO - CapEx. Check whether strength remains after reinvestment."},
         ]
