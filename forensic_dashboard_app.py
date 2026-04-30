@@ -280,10 +280,107 @@ def build_investment_view(mods: dict[str, Any], completeness: dict[str, Any]) ->
 
 @app.route("/")
 def home() -> str:
-    return render_template_string("""<html><body style='background:#050816;color:#fff;font-family:sans-serif;padding:24px'>
-    <h1>Forensic Command Center</h1><p>Visibly redesigned forensic lab UI.</p>
-    <ol><li>Hero Forensic Command Center</li><li>Forensic Investment View</li><li>Risk Radar</li><li>Screener Cockpit</li><li>Quarterly Forensic Breakdown</li></ol>
-    <p>Use <code>/api/analyze?ticker=MRK&period=5y</code> or <code>/api/screener</code>.</p></body></html>""")
+    return render_template_string("""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Forensic Command Center</title>
+  <style>
+    :root { --bg:#070b14; --panel:#0f1628; --panel2:#111b31; --text:#d8e3ff; --muted:#8fa4d1; --line:#243556; --ok:#3ddc97; --warn:#f6c453; --bad:#ff6b6b; --accent:#57a6ff; }
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at 20% 0%, #182646 0%, var(--bg) 40%);color:var(--text);font-family:Inter,Segoe UI,system-ui,sans-serif}
+    .wrap{max-width:1320px;margin:0 auto;padding:22px} .head{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:18px}
+    h1{margin:0;font-size:1.7rem} .muted{color:var(--muted);font-size:.92rem}
+    .ctl{display:flex;gap:10px;flex-wrap:wrap}.ctl input,.ctl button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:10px}
+    .ctl button{background:linear-gradient(90deg,#1e4f89,#2769b6);cursor:pointer;font-weight:700}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:0 8px 22px rgba(0,0,0,.25)}
+    .span-3{grid-column:span 3}.span-4{grid-column:span 4}.span-6{grid-column:span 6}.span-8{grid-column:span 8}.span-12{grid-column:span 12}
+    .k{font-size:.76rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}.v{font-size:1.1rem;font-weight:700;margin-top:5px}
+    .risk{display:inline-block;padding:4px 8px;border-radius:999px;font-size:.75rem;font-weight:700;border:1px solid var(--line)} .r-high{color:var(--bad)} .r-mod{color:var(--warn)} .r-low{color:var(--ok)} .r-unk{color:var(--muted)}
+    table{width:100%;border-collapse:collapse;font-size:.86rem} th,td{border-bottom:1px solid #1b2a48;padding:8px;text-align:left} th{color:#a8bce8;font-weight:600}
+    ul{margin:8px 0 0 18px;padding:0} .mono{font-family:ui-monospace,Menlo,Consolas,monospace}.loading{opacity:.8}
+    @media(max-width:1024px){.span-3,.span-4,.span-6,.span-8{grid-column:span 12}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div><h1>Forensic Command Center</h1><div class="muted">Hedge-fund style forensic dashboard for tax, quarterly, debt, and investment signals.</div></div>
+      <div class="ctl"><input id="ticker" value="TSLA" aria-label="Ticker" /><button id="analyzeBtn">Analyze</button><button id="reloadScreener">Reload Screener</button></div>
+    </div>
+    <div class="grid" id="topCards"></div>
+    <div class="grid" style="margin-top:12px">
+      <section class="card span-6"><div class="k">Tax Analysis</div><div id="tax"></div></section>
+      <section class="card span-6"><div class="k">Debt Analysis</div><div id="debt"></div></section>
+      <section class="card span-12"><div class="k">Quarterly Analysis</div><div id="quarterly"></div></section>
+      <section class="card span-8"><div class="k">Investment View</div><div id="invest"></div></section>
+      <section class="card span-4"><div class="k">Data Completeness</div><div id="complete"></div></section>
+      <section class="card span-12"><div class="k">Screener</div><div id="screener" class="loading">Loading screener...</div></section>
+    </div>
+  </div>
+<script>
+const $ = (id)=>document.getElementById(id);
+const riskCls=(r='')=>/high/i.test(r)?'r-high':/mod|partial|watch/i.test(r)?'r-mod':/low|complete|stable|buy/i.test(r)?'r-low':'r-unk';
+const pill=(r)=>`<span class="risk ${riskCls(r)}">${r||'Unknown'}</span>`;
+const n=(v)=>v==null?'—':(typeof v==='number'?v.toLocaleString(undefined,{maximumFractionDigits:2}):v);
+const reasonList=(arr)=>!arr||!arr.length?'<div class="muted">None</div>':`<ul>${arr.map(x=>`<li>${x}</li>`).join('')}</ul>`;
+
+async function analyze(){
+  const t= $('ticker').value.trim().toUpperCase() || 'TSLA';
+  $('analyzeBtn').disabled=true;
+  try{
+    const r=await fetch(`/api/analyze?ticker=${encodeURIComponent(t)}&period=5y`); const d=await r.json(); render(d);
+  }catch(e){ alert('Analyze failed: '+e.message); }
+  finally{ $('analyzeBtn').disabled=false; }
+}
+
+function render(d){
+  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{};
+  $('topCards').innerHTML = `
+    <div class="card span-3"><div class="k">Ticker</div><div class="v mono">${d.ticker||'—'}</div></div>
+    <div class="card span-3"><div class="k">Tax Risk</div><div class="v">${pill(tax.tax_risk_level)}</div></div>
+    <div class="card span-3"><div class="k">Quarterly Risk</div><div class="v">${pill(q.quarterly_risk_level)}</div></div>
+    <div class="card span-3"><div class="k">Debt Risk</div><div class="v">${pill(debt.risk_level)}</div></div>`;
+
+  const tr=(tax.rows&&tax.rows[0])||{};
+  $('tax').innerHTML = `<table><tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>Risk</td><td>${pill(tax.tax_risk_level)}</td></tr><tr><td>Quality Score</td><td>${n(tax.tax_quality_score)}</td></tr>
+    <tr><td>ETR</td><td>${n(tr.etr)}</td></tr><tr><td>Pretax Income</td><td>${n(tr.pretax_income)}</td></tr>
+    <tr><td>Tax Expense</td><td>${n(tr.income_tax_expense)}</td></tr><tr><td>Source</td><td>${tax.source||'—'}</td></tr></table>
+    <div class="k" style="margin-top:10px">Reason Codes</div>${reasonList(tax.reason_codes)}`;
+
+  $('debt').innerHTML = `<table><tr><th>Ratio</th><th>Value</th></tr>${Object.entries(debt.ratios||{}).map(([k,v])=>`<tr><td>${k}</td><td>${n(v)}</td></tr>`).join('')||'<tr><td colspan="2" class="muted">No ratios available</td></tr>'}</table>
+  <div class="k" style="margin-top:10px">Risk Flags</div>${reasonList(debt.flags)}`;
+
+  $('quarterly').innerHTML = `<div style="margin-bottom:8px">${pill(q.quarterly_risk_level)} <span class="muted">Signal: ${q.signal_label||'—'}</span></div>
+    <table><tr><th>Period</th><th>Revenue</th><th>Net Income</th><th>CFO</th><th>FCF</th><th>CFO/NI</th></tr>
+    ${(q.rows||[]).map(r=>`<tr><td>${r.period||'—'}</td><td>${n(r.revenue)}</td><td>${n(r.net_income)}</td><td>${n(r.cfo)}</td><td>${n(r.fcf)}</td><td>${n(r.cfo_ni)}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">No quarterly rows</td></tr>'}</table>
+    <div class="k" style="margin-top:10px">Reason Codes</div>${reasonList(q.reason_codes)}`;
+
+  $('invest').innerHTML = `<div class="v">${inv.forensic_view||'INCONCLUSIVE'}</div><div class="muted">Confidence: ${inv.confidence||'Low'}</div>
+  <div class="k" style="margin-top:10px">Risks</div>${reasonList(inv.risks)}<div class="k" style="margin-top:10px">Supporting Reasons</div>${reasonList(inv.supporting_reasons)}
+  <div class="k" style="margin-top:10px">What Would Change View</div>${reasonList(inv.what_would_change_view)}`;
+
+  $('complete').innerHTML = `<div class="v">${n(comp.score)} / 100</div><div>${pill(comp.level)}</div><div class="k" style="margin-top:10px">Missing Fields</div>${reasonList(comp.missing_fields)}`;
+}
+
+async function loadScreener(){
+  const el=$('screener'); el.classList.add('loading'); el.textContent='Loading screener...';
+  try{
+    const r=await fetch('/api/screener'); const d=await r.json();
+    const rows=d.rows||[];
+    el.innerHTML = `<table><tr><th>Ticker</th><th>Tax Risk</th><th>Quarterly Risk</th><th>Debt Risk</th><th>Forensic View</th><th>Confidence</th><th>Completeness</th><th>Main Reason</th></tr>
+      ${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Quarterly Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${x['Forensic View']||'—'}</td><td>${x.Confidence||'—'}</td><td>${pill(x['Data Completeness'])}</td><td>${x['Main Reason']||'—'}</td></tr>`).join('')}</table>`;
+  }catch(e){ el.textContent='Screener failed: '+e.message; }
+  finally{ el.classList.remove('loading'); }
+}
+$('analyzeBtn').addEventListener('click', analyze); $('reloadScreener').addEventListener('click', loadScreener);
+analyze(); loadScreener();
+</script>
+</body>
+</html>
+""")
 
 
 @app.route("/api/analyze")
