@@ -35,6 +35,7 @@ CORE_SCREENER_UNIVERSE = DEFAULT_WATCHLIST + [
 ]
 _SP500_CACHE: list[str] | None = None
 FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
+SEC_FACTS_CACHE: dict[str, dict[str, Any]] = {}
 
 APP_HTML = r"""<!doctype html>
 <html lang="en">
@@ -303,7 +304,7 @@ APP_HTML = r"""<!doctype html>
     </div>
 
     <div class="grid">
-      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Quarterly Risk</th><th>Q CFO/NI</th><th>Q DSRI</th><th>Quarterly Main Flag</th><th>Forensic View</th><th>Confidence</th><th>Main reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
+      <div class="panel span-8"><div class="section-title"><h2>Suspicious companies screener</h2><span class="muted">Click a row to load full analysis</span></div><div style="overflow:auto;"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Quality</th><th>Red flags</th><th>Risk</th><th>Tax Source</th><th>Tax Data Status</th><th>Quarterly Source</th><th>Quarterly Data Status</th><th>CFO/NI</th><th>Beneish</th><th>DSRI</th><th>Quarterly Risk</th><th>Q CFO/NI</th><th>Q DSRI</th><th>Quarterly Main Flag</th><th>Forensic View</th><th>Confidence</th><th>Main reason</th></tr></thead><tbody id="screenerBody"></tbody></table></div></div>
       <div class="panel span-4"><div class="section-title"><h2>10-K access</h2><span class="muted">Fast navigation</span></div><div id="filingsBox" class="flags"></div></div>
 
       <div class="panel span-8"><div class="section-title"><h2>Price & trend</h2><span class="muted">Market view</span></div><div id="priceChart" style="height:360px;"></div></div>
@@ -878,7 +879,7 @@ APP_HTML = r"""<!doctype html>
   function renderScreener(rows) {
     const body = document.getElementById('screenerBody');
     if (!body) return;
-    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.quarterly_risk || '-'}</td><td>${numFmt(r.latest_quarter_cfo_ni)}</td><td>${numFmt(r.latest_quarter_dsri)}</td><td>${r.quarterly_main_flag || '-'}</td><td>${r.forensic_view || '-'}</td><td>${r.confidence || '-'}</td><td>${r.main_reason || r.short_reason || r.reason || '-'}</td></tr>`).join('');
+    body.innerHTML = rows.map((r, idx) => `<tr class="clickable-row" onclick="loadTickerFromScreener('${r.ticker}')"><td>${idx + 1}</td><td>${r.ticker}</td><td>${numFmt(r.score)}</td><td>${r.quality_classification || '-'}</td><td>${r.red_flag_count ?? '-'}</td><td>${r.risk || '-'}</td><td>${r.tax_source || '-'}</td><td>${r.tax_data_status || '-'}</td><td>${r.quarterly_source || '-'}</td><td>${r.quarterly_data_status || '-'}</td><td>${numFmt(r.cfo_ni)}</td><td>${numFmt(r.beneish)}</td><td>${numFmt(r.dsri)}</td><td>${r.quarterly_risk || '-'}</td><td>${numFmt(r.latest_quarter_cfo_ni)}</td><td>${numFmt(r.latest_quarter_dsri)}</td><td>${r.quarterly_main_flag || '-'}</td><td>${r.forensic_view || '-'}</td><td>${r.confidence || '-'}</td><td>${r.main_reason || r.short_reason || r.reason || '-'}</td></tr>`).join('');
     document.getElementById('screenCount').textContent = String(rows.length || 0);
     document.getElementById('screenWorst').textContent = rows.length ? numFmt(rows[0].score) : '-';
     const text = rows.flatMap(r => (r.short_reason || r.reason || '').split(',').map(x => x.trim())).filter(Boolean);
@@ -904,7 +905,7 @@ APP_HTML = r"""<!doctype html>
     body.innerHTML=rows.map(r=>{const an=(r.risk_notes||[]).length>0;return `<tr style="background:${an?'rgba(248,113,113,0.08)':'transparent'}"><td>${r.period||'-'}</td><td>${moneyFmt(r.revenue)}</td><td>${moneyFmt(r.net_income)}</td><td>${moneyFmt(r.cfo)}</td><td>${numFmt(r.cfo_ni)}</td><td>${moneyFmt(r.accruals)}</td><td>${pctFmt(r.revenue_qoq_growth)}</td><td>${pctFmt(r.ar_qoq_growth)}</td><td>${pctFmt(r.inventory_qoq_growth)}</td><td>${numFmt(r.dsri_q_proxy)}</td><td>${pctFmt(r.gross_margin)}</td><td>${(r.risk_notes||[]).join('; ')||'-'}</td></tr>`}).join('');
     const qf=(q&&q.quarterly_flags)||[];
     flags.innerHTML=qf.length?qf.map(f=>`<div class="flag ${f.severity==='High'?'bad':f.severity==='Medium'?'warn':'ok'}"><div class="t">${f.code||'Signal'} (${f.severity||'Low'})</div><div class="muted">${f.reason||f}</div></div>`).join(''):'<div class="flag ok"><div class="t">No major quarterly anomaly</div></div>';
-    manual.innerHTML=`<div class="t">What to inspect in the 10-Q</div><div class="muted">${((q&&q.manual_review_checks)||[]).join(' • ')}</div>`;
+    manual.innerHTML=`<div class="t">What to inspect in the 10-Q</div><div class="muted">Source: ${(q&&q.source)||'unavailable'} | Status: ${(q&&q.data_status)||'Unavailable'} | ${((q&&q.manual_review_checks)||[]).join(' • ')}</div>`;
   }
 
   function renderForensicInvestmentView(view) {
@@ -1016,7 +1017,7 @@ APP_HTML = r"""<!doctype html>
     setPill('taxDivergencePill', numFmt(divergence), divCls);
     setPill('taxRiskPill', risk, riskCls);
 
-    document.getElementById('taxReasonCodes').textContent = (tax.reason_codes || []).join(' | ') || 'No tax reason code.';
+    document.getElementById('taxReasonCodes').textContent = `Source: ${tax.source || 'unavailable'} | Status: ${tax.data_status || 'Unavailable'} | ` + ((tax.reason_codes || []).join(' | ') || 'No tax reason code.');
     const rows = tax.tax_rows || [];
     document.getElementById('taxTableBody').innerHTML = rows.map(r => `<tr><td>${r.period || '-'}</td><td>${moneyFmt(r.pre_tax_income)}</td><td>${moneyFmt(r.income_tax_expense)}</td><td>${moneyFmt(r.cash_taxes_paid)}</td><td>${pctFmt(r.etr)}</td><td>${numFmt(r.cash_tax_to_expense)}</td><td>${moneyFmt(r.deferred_tax_total)}</td></tr>`).join('');
 
@@ -1442,6 +1443,54 @@ def get_companyfacts_ticker_map() -> dict[str, dict[str, Any]]:
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return {item["ticker"].upper(): item for _, item in data.items()}
+
+
+def get_sec_company_facts(ticker: str) -> dict[str, Any]:
+    t = ticker.upper()
+    if t in SEC_FACTS_CACHE:
+        return SEC_FACTS_CACHE[t]
+    try:
+        tmap = get_companyfacts_ticker_map()
+        info = tmap.get(t)
+        if not info:
+            SEC_FACTS_CACHE[t] = {}
+            return {}
+        cik = str(info["cik_str"]).zfill(10)
+        r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json", headers=SEC_HEADERS, timeout=30)
+        r.raise_for_status()
+        payload = r.json() if isinstance(r.json(), dict) else {}
+        SEC_FACTS_CACHE[t] = payload
+        return payload
+    except Exception:
+        traceback.print_exc()
+        SEC_FACTS_CACHE[t] = {}
+        return {}
+
+
+def extract_sec_fact_series(companyfacts: dict[str, Any], tag_candidates: list[str], form_filter: set[str] | None = None, quarterly: bool = False) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    facts = (companyfacts or {}).get("facts", {})
+    for tax in ("us-gaap", "dei"):
+        space = facts.get(tax, {})
+        for tag in tag_candidates:
+            node = space.get(tag, {})
+            units = node.get("units", {})
+            points = units.get("USD") or next(iter(units.values()), [])
+            for p in points:
+                form = p.get("form")
+                fp = (p.get("fp") or "").upper()
+                if form_filter and form not in form_filter:
+                    continue
+                if quarterly and fp and fp not in {"Q1", "Q2", "Q3", "Q4", "FY"}:
+                    continue
+                out.append({"period": p.get("end"), "fy": p.get("fy"), "fp": fp or None, "form": form, "filed": p.get("filed"), "value": safe_float(p.get("val")), "tag": tag, "source": "SEC Company Facts"})
+            if out:
+                out.sort(key=lambda x: ((x.get("period") or ""), (x.get("filed") or "")))
+                dedup = {}
+                for r in out:
+                    dedup[(r.get("period"), r.get("fy"), r.get("fp"), r.get("form"))] = r
+                return list(dedup.values())
+    return []
 
 
 def get_sp500_tickers(limit: int | None = 300) -> list[str]:
@@ -4022,12 +4071,15 @@ def build_quarterly_forensic_rows(ticker: str) -> dict[str, Any]:
         "inspect restructuring or one-off items", "inspect quarter-end sales acceleration",
     ]
     try:
+        sec_rows = extract_quarterly_rows_from_sec(ticker)
         tk = yf.Ticker(ticker)
         fin = (tk.quarterly_financials.T if tk.quarterly_financials is not None else pd.DataFrame()).copy()
         cf = (tk.quarterly_cashflow.T if tk.quarterly_cashflow is not None else pd.DataFrame()).copy()
         bs = (tk.quarterly_balance_sheet.T if tk.quarterly_balance_sheet is not None else pd.DataFrame()).copy()
         if fin.empty and cf.empty and bs.empty:
-            return {"quarterly_rows": [], "quarterly_risk_level": "Unknown", "quarterly_flags": ["Quarterly data unavailable"], "manual_review_checks": manual_checks}
+            if sec_rows:
+                return {"quarterly_rows": sec_rows, "manual_review_checks": manual_checks, "source": "SEC Company Facts", "data_status": "Complete"}
+            return {"quarterly_rows": [], "quarterly_risk_level": "Unknown", "quarterly_flags": ["Quarterly data unavailable from yfinance and SEC Company Facts"], "manual_review_checks": manual_checks, "source": "unavailable", "data_status": "Unavailable"}
         rev = pick_series(fin, ["Total Revenue", "Operating Revenue", "Revenue"]); ni = pick_series(fin, ["Net Income", "Net Income Common Stockholders"]); gp = pick_series(fin, ["Gross Profit"])
         cfo = pick_series(cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities", "Total Cash From Operating Activities"]); capex = pick_series(cf, ["Capital Expenditure", "Capital Expenditures"])
         ar = pick_series(bs, ["Accounts Receivable", "Receivables", "Net Receivables"]); inv = pick_series(bs, ["Inventory", "Inventories"]); pay = pick_series(bs, ["Accounts Payable", "Payables And Accrued Expenses", "Current Payables"])
@@ -4053,9 +4105,70 @@ def build_quarterly_forensic_rows(ticker: str) -> dict[str, Any]:
             vals=[r.get(x) for x in ["revenue","net_income","cfo","ar","inventory","payables","cfo_ni","dsri_q_proxy"]]
             r["data_completeness_score"]=safe_div(sum(1 for v in vals if safe_float(v) is not None), len(vals))
             rows.append(r)
-        return {"quarterly_rows": rows, "manual_review_checks": manual_checks}
+        y_rows = rows
+        if sec_rows and len(sec_rows) >= len(y_rows):
+            return {"quarterly_rows": sec_rows, "manual_review_checks": manual_checks, "source": "SEC Company Facts", "data_status": "Complete"}
+        if sec_rows and y_rows:
+            merged = y_rows
+            return {"quarterly_rows": merged, "manual_review_checks": manual_checks, "source": "yfinance+SEC Company Facts", "data_status": "Partial"}
+        return {"quarterly_rows": y_rows, "manual_review_checks": manual_checks, "source": "yfinance", "data_status": "Complete" if y_rows else "Unavailable"}
     except Exception:
-        return {"quarterly_rows": [], "quarterly_risk_level": "Unknown", "quarterly_flags": ["Quarterly data unavailable"], "manual_review_checks": manual_checks}
+        traceback.print_exc()
+        return {"quarterly_rows": [], "quarterly_risk_level": "Unknown", "quarterly_flags": ["Quarterly data unavailable"], "manual_review_checks": manual_checks, "source": "unavailable", "data_status": "Unavailable"}
+
+
+def extract_tax_rows_from_sec(ticker: str) -> list[dict[str, Any]]:
+    facts = get_sec_company_facts(ticker)
+    if not facts:
+        return []
+    tags = {
+        "pretax_income": ["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest", "IncomeLossFromContinuingOperationsBeforeIncomeTaxes"],
+        "income_tax_expense": ["IncomeTaxExpenseBenefit"],
+        "current_tax_expense": ["CurrentIncomeTaxExpenseBenefit"],
+        "deferred_tax_expense": ["DeferredIncomeTaxExpenseBenefit"],
+        "cash_taxes_paid": ["IncomeTaxesPaidNet", "IncomeTaxesPaid", "PaymentsOfIncomeTaxes"],
+        "deferred_tax_assets": ["DeferredTaxAssets", "DeferredTaxAssetsLiabilitiesNet"],
+        "deferred_tax_liabilities": ["DeferredTaxLiabilities", "DeferredTaxAssetsLiabilitiesNet"],
+        "valuation_allowance": ["ValuationAllowanceDeferredTaxAssets"],
+        "unrecognized_tax_benefits": ["UnrecognizedTaxBenefits"],
+    }
+    by_period: dict[str, dict[str, Any]] = {}
+    for col, tc in tags.items():
+        for row in extract_sec_fact_series(facts, tc, form_filter={"10-K", "10-Q"}):
+            p = row.get("period")
+            if not p:
+                continue
+            by_period.setdefault(p, {"period": p, "source": "SEC Company Facts"})[col] = row.get("value")
+    out = []
+    for p in sorted(by_period):
+        r = by_period[p]
+        pretax = safe_float(r.get("pretax_income")); tax = safe_float(r.get("income_tax_expense")); cash = safe_float(r.get("cash_taxes_paid")); dtx = safe_float(r.get("deferred_tax_expense"))
+        r["etr"] = safe_div(tax, pretax); r["cash_tax_rate"] = safe_div(cash, pretax); r["cash_tax_ratio"] = safe_div(cash, tax); r["deferred_tax_dependency"] = safe_div(dtx, pretax)
+        out.append(r)
+    return out[-8:]
+
+
+def extract_quarterly_rows_from_sec(ticker: str) -> list[dict[str, Any]]:
+    facts = get_sec_company_facts(ticker)
+    if not facts:
+        return []
+    mapping = {"revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"], "net_income": ["NetIncomeLoss"], "cfo": ["NetCashProvidedByUsedInOperatingActivities", "OperatingCashFlow"], "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"], "ar": ["AccountsReceivableNetCurrent", "AccountsReceivableNet"], "inventory": ["InventoryNet", "InventoryFinishedGoods"], "payables": ["AccountsPayableCurrent"], "cogs": ["CostOfRevenue", "CostOfGoodsAndServicesSold"], "gross_profit": ["GrossProfit"]}
+    by_key = {k: extract_sec_fact_series(facts, v, form_filter={"10-Q", "10-K"}, quarterly=True) for k, v in mapping.items()}
+    periods = sorted(set(r.get("period") for vv in by_key.values() for r in vv if r.get("period")))
+    rows = []
+    for p in periods[-8:]:
+        r = {"period": p, "source": "SEC Company Facts"}
+        for k, vv in by_key.items():
+            pick = next((x for x in reversed(vv) if x.get("period") == p), None)
+            r[k] = safe_float(pick.get("value")) if pick else None
+            if pick:
+                r["fy"], r["fp"] = pick.get("fy"), pick.get("fp")
+        r["fcf"] = safe_sub(r.get("cfo"), safe_abs(r.get("capex"))); r["gross_margin"] = safe_div(r.get("gross_profit"), r.get("revenue")); r["cfo_ni"] = safe_div(r.get("cfo"), r.get("net_income")); r["accruals"] = safe_sub(r.get("net_income"), r.get("cfo"))
+        rows.append(r)
+    for i in range(1, len(rows)):
+        c, prev = rows[i], rows[i-1]
+        c["revenue_qoq_growth"] = safe_pct_change(c.get("revenue"), prev.get("revenue")); c["ar_qoq_growth"] = safe_pct_change(c.get("ar"), prev.get("ar")); c["inventory_qoq_growth"] = safe_pct_change(c.get("inventory"), prev.get("inventory")); c["dsri_q_proxy"] = safe_div(safe_div(c.get("ar"), c.get("revenue")), safe_div(prev.get("ar"), prev.get("revenue")))
+    return rows
 
 def analyze_quarterly_forensic_signals(quarterly_rows: list[dict[str, Any]]) -> dict[str, Any]:
     out={"quarterly_risk_score":0,"quarterly_risk_level":"Unknown","quarterly_flags":[],"latest_quarter_analysis":{},"normal_signals":[],"suspicious_signals":[],"manual_review_checks":[]}
@@ -4092,9 +4205,14 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
             flags, risk, cfo_ni, beneish, components = generate_flags(quality_rows)
             inventory_diag = analyze_inventory_quality_detailed(quality_rows, wc_rows)
             receivables_diag = analyze_receivables_quality(quality_rows)
-            tax_analysis = analyze_tax_quality(quality_rows)
+            sec_tax_rows = extract_tax_rows_from_sec(ticker)
+            tax_analysis = analyze_tax_quality(sec_tax_rows if sec_tax_rows else quality_rows)
+            tax_analysis["source"] = "SEC Company Facts" if sec_tax_rows else "yfinance"
+            tax_analysis["data_status"] = "Complete" if (tax_analysis.get("tax_rows") or []) else "Unavailable"
             q_payload = build_quarterly_forensic_rows(ticker)
             q_analysis = analyze_quarterly_forensic_signals(q_payload.get("quarterly_rows", []))
+            q_analysis["source"] = q_payload.get("source", "yfinance")
+            q_analysis["data_status"] = q_payload.get("data_status", "Unavailable")
             cashflow_flags = build_cashflow_flags(cashflow_rows, acq_metrics)
             score, _, _ = compute_forensic_score(cfo_ni, beneish, len(flags) + len(cashflow_flags), components=components)
             inv_penalty = min((safe_float(inventory_analysis.get("inventory_quality_score")) or 0.0) * 0.18, 16.0)
@@ -4153,6 +4271,10 @@ def build_screener_snapshot(mode: str = "core") -> list[dict[str, Any]]:
                     "main_reason": forensic_investment_view.get("main_reason"),
                     "distress_rank": distress_rank,
                     "quarterly_risk": q_analysis.get("quarterly_risk_level", "Unknown"),
+                    "tax_source": tax_analysis.get("source", "unavailable"),
+                    "tax_data_status": tax_analysis.get("data_status", "Unavailable"),
+                    "quarterly_source": q_analysis.get("source", "unavailable"),
+                    "quarterly_data_status": q_analysis.get("data_status", "Unavailable"),
                     "latest_quarter_cfo_ni": safe_float((q_analysis.get("latest_quarter_analysis") or {}).get("cfo_ni")),
                     "latest_quarter_dsri": safe_float((q_analysis.get("latest_quarter_analysis") or {}).get("dsri")),
                     "quarterly_main_flag": ((q_analysis.get("quarterly_flags") or [{}])[0].get("reason") if isinstance((q_analysis.get("quarterly_flags") or [{}])[0], dict) else (q_analysis.get("quarterly_flags") or ["-"])[0]),
@@ -4255,6 +4377,8 @@ def build_quarterly_forensic_analysis(ticker: str) -> dict[str, Any]:
     rows = payload.get("quarterly_rows", []) if isinstance(payload, dict) else []
     analyzed = analyze_quarterly_forensic_signals(rows)
     out.update(analyzed or {})
+    out["source"] = payload.get("source", "unavailable") if isinstance(payload, dict) else "unavailable"
+    out["data_status"] = payload.get("data_status", "Unavailable") if isinstance(payload, dict) else "Unavailable"
     if not out.get("quarterly_rows"):
         out["quarterly_flags"] = ["Quarterly data unavailable"]
     return out
@@ -4311,7 +4435,18 @@ def analyze() -> Any:
                 "detail": "; ".join((inventory_analysis.get("reason_codes") or [])[:2]),
             })
         try:
-            tax_analysis = analyze_tax_quality(quality_rows)
+            sec_tax_rows = extract_tax_rows_from_sec(ticker)
+            tax_analysis = analyze_tax_quality(sec_tax_rows if sec_tax_rows else quality_rows)
+            tax_analysis["source"] = "SEC Company Facts" if sec_tax_rows else "yfinance"
+            if not (tax_analysis.get("tax_rows") or []):
+                tax_analysis["tax_risk_level"] = "Unknown"
+                tax_analysis["data_status"] = "Unavailable"
+                tax_analysis["reason_codes"] = [
+                    "Tax data unavailable from yfinance and SEC structured facts",
+                    "Manual income tax footnote review required",
+                ]
+            else:
+                tax_analysis["data_status"] = "Partial" if any(any(v is None for k, v in r.items() if k in {"pretax_income", "income_tax_expense", "cash_taxes_paid"}) for r in tax_analysis.get("tax_rows", [])) else "Complete"
         except Exception as e:
             print(f"[ERROR] {ticker} tax analysis: {type(e).__name__}: {e}")
             traceback.print_exc()
@@ -4354,6 +4489,10 @@ def analyze() -> Any:
             traceback.print_exc()
         try:
             quarterly_analysis = build_quarterly_forensic_analysis(ticker)
+            if not (quarterly_analysis.get("quarterly_rows") or []):
+                quarterly_analysis["quarterly_risk_level"] = "Unknown"
+                quarterly_analysis["quarterly_risk_score"] = None
+                quarterly_analysis["reason_codes"] = ["Quarterly data unavailable from yfinance and SEC Company Facts"]
         except Exception as e:
             print(f"[ERROR] {ticker} quarterly analysis: {type(e).__name__}: {e}")
             traceback.print_exc()
