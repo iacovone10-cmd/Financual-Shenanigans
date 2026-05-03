@@ -623,7 +623,7 @@ def home() -> str:
 <body>
   <div class="wrap">
     <div class="head">
-      <div><h1>Forensic Command Center</h1><div class="muted">Hedge-fund style forensic dashboard for tax, quarterly, debt, and investment signals.</div></div>
+      <div><h1>Forensic Command Center</h1><div class="muted">Analyst-first forensic dashboard: what matters, why it matters, where to verify it, and how it changes the forensic view.</div></div>
       <div class="ctl"><input id="ticker" value="TSLA" aria-label="Ticker" /><button id="analyzeBtn">Analyze</button><button id="reloadScreener">Reload Screener</button></div>
     </div>
     <div class="grid" id="topCards"></div>
@@ -645,6 +645,27 @@ const pill=(r)=>`<span class="risk ${riskCls(r)}">${r||'Unknown'}</span>`;
 const n=(v)=>v==null?'—':(typeof v==='number'?v.toLocaleString(undefined,{maximumFractionDigits:2}):v);
 const reasonList=(arr)=>!arr||!arr.length?'<div class="muted">None</div>':`<ul>${arr.map(x=>`<li>${x}</li>`).join('')}</ul>`;
 
+const topItems=(arr,limit=3)=> (arr||[]).filter(Boolean).slice(0,limit);
+function buildAnalystBrief(d, inv, fs, filing){
+  const whatMatters = topItems([...(inv.risks||[]), ...(fs.top_text_red_flags||[]), ...((d.tax_analysis||{}).reason_codes||[])]);
+  const whyMatters = topItems([
+    `Forensic view is ${inv.forensic_view||'INCONCLUSIVE'} with ${inv.confidence||'Low'} confidence`,
+    `Data completeness is ${((d.data_completeness||{}).score ?? '—')}/100 (${(d.data_completeness||{}).level||'Unknown'})`,
+    ...((d.quarterly_analysis||{}).reason_codes||[])
+  ]);
+  const latest10k=(filing.latest_10k||{}), latest10q=(filing.latest_10q||{});
+  const whereVerify = topItems([
+    latest10k.filing_url ? `10-K (${latest10k.filing_date||'date unavailable'})` : null,
+    latest10q.filing_url ? `10-Q (${latest10q.filing_date||'date unavailable'})` : null,
+    `SEC diagnostics: filing_text_downloaded=${(filing.diagnostics||{}).filing_text_downloaded}`
+  ],4);
+  const impact = topItems([
+    ...((inv.supporting_reasons)||[]),
+    ...((inv.what_would_change_view)||[])
+  ],4);
+  return {whatMatters, whyMatters, whereVerify, impact};
+}
+
 async function analyze(){
   const t= $('ticker').value.trim().toUpperCase() || 'TSLA';
   $('analyzeBtn').disabled=true;
@@ -656,6 +677,7 @@ async function analyze(){
 
 function render(d){
   const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{}, sp=d.special_items_analysis||{};
+  const brief = buildAnalystBrief(d, inv, fs, filing);
   $('topCards').innerHTML = `
     <div class="card span-3"><div class="k">Ticker</div><div class="v mono">${d.ticker||'—'}</div></div>
     <div class="card span-3"><div class="k">Tax Risk</div><div class="v">${pill(tax.tax_risk_level)}</div></div>
@@ -679,8 +701,11 @@ function render(d){
     <div class="k" style="margin-top:10px">Reason Codes</div>${reasonList(q.reason_codes)}`;
 
   $('invest').innerHTML = `<div class="v">${inv.forensic_view||'INCONCLUSIVE'}</div><div class="muted">Confidence: ${inv.confidence||'Low'}</div>
-  <div class="k" style="margin-top:10px">Risks</div>${reasonList(inv.risks)}<div class="k" style="margin-top:10px">Supporting Reasons</div>${reasonList(inv.supporting_reasons)}
-  <div class="k" style="margin-top:10px">What Would Change View</div>${reasonList(inv.what_would_change_view)}`;
+  <div class="k" style="margin-top:10px">What matters now</div>${reasonList(brief.whatMatters)}
+  <div class="k" style="margin-top:10px">Why it matters</div>${reasonList(brief.whyMatters)}
+  <div class="k" style="margin-top:10px">How it affects the forensic view</div>${reasonList(brief.impact)}
+  <details><summary>Full risk and support detail</summary><div class="k" style="margin-top:10px">Risks</div>${reasonList(inv.risks)}<div class="k" style="margin-top:10px">Supporting Reasons</div>${reasonList(inv.supporting_reasons)}
+  <div class="k" style="margin-top:10px">What Would Change View</div>${reasonList(inv.what_would_change_view)}</details>`;
 
   $('complete').innerHTML = `<div class="v">${n(comp.score)} / 100</div><div>${pill(comp.level)}</div><div class="k" style="margin-top:10px">Missing Fields</div>${reasonList(comp.missing_fields)}`;
 
@@ -692,6 +717,7 @@ function render(d){
 
   $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>${unavailableMsg}
   <table><tr><th>Form</th><th>Date</th><th>Link</th></tr><tr><td>10-K</td><td>${k.filing_date||'—'}</td><td>${link(k.filing_url)}</td></tr><tr><td>10-Q</td><td>${qf.filing_date||'—'}</td><td>${link(qf.filing_url)}</td></tr></table>
+  <div class="k" style="margin-top:10px">Where to verify (primary sources)</div>${reasonList(brief.whereVerify)}
   <div class="k" style="margin-top:10px">Top Red Flags</div>${reasonList(fs.top_text_red_flags)}
   <div class="k" style="margin-top:10px">Extracted Excerpts</div>${reasonList(fs.most_relevant_excerpts)}
   <div class="k" style="margin-top:10px">Tax Footnote Intelligence</div>${reasonList((filing.tax||{}).tax_text_flags)}
