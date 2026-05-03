@@ -113,6 +113,43 @@ def default_debt_analysis() -> dict[str, Any]:
     return {"risk_level": "Unknown", "data_status": "Unavailable", "flags": [], "ratios": {}}
 
 
+
+
+def default_special_items_analysis() -> dict[str, Any]:
+    return {
+        "risk_level": "Unknown",
+        "score": None,
+        "metrics": {
+            "acquisitions_to_cfo": None,
+            "acquisitions_to_revenue": None,
+            "special_items_to_net_income": None,
+            "non_operating_income_to_net_income": None,
+            "restructuring_to_operating_income": None,
+            "impairment_to_assets": None,
+            "divestiture_gains_to_net_income": None,
+        },
+        "flags": ["Special items module unavailable"],
+        "normal_signals": [],
+        "suspicious_signals": [],
+        "text_findings": [],
+        "excerpt_windows": [],
+        "tenk_checks": [
+            "Inspect acquisitions footnote",
+            "Separate organic growth from acquired growth",
+            "Review purchase price allocation",
+            "Check goodwill and intangible assets",
+            "Inspect impairment testing assumptions",
+            "Review restructuring charges across multiple years",
+            "Check discontinued operations and divestiture gains",
+            "Review accounting changes and ASU adoption impact",
+            "Check restatements, corrections of errors and internal control weaknesses",
+        ],
+        "data_status": "Unavailable",
+        "acquisition_risk": "Unknown",
+        "accounting_change_flag": "Unavailable",
+        "main_special_item_finding": "Unavailable",
+    }
+
 def default_macro_analysis() -> dict[str, Any]:
     return {"macro_stress_score": 58, "regime_label": "Slowing growth / sticky inflation", "reason_codes": ["Global growth 2.6% baseline", "US inflation 3.2% baseline"], "forensic_interpretation": "Macro amplifies accounting and leverage risks."}
 
@@ -360,6 +397,89 @@ def analyze_revenue_and_nonrecurring_text(filing_text: str) -> dict[str, Any]:
     flags=[("Revenue recognition complexity detected", ["revenue recognition","bill-and-hold","channel stuffing"]),("Contract asset / liability language detected", ["contract assets","contract liabilities","deferred revenue"]),("Customer incentives / rebates may affect revenue quality", ["customer incentives","rebates","discounts","returns"]),("Nonrecurring item language detected", ["one-time","non-recurring","unusual item","discontinued operations"]),("Restructuring / impairment language detected", ["restructuring","impairment"]),("Gain on sale / divestiture language detected", ["gain on sale","divestiture","fair value gain"])]
     return _analyze_text_block(filing_text,kws,flags)
 
+def analyze_special_items_text(filing_text: str) -> dict[str, Any]:
+    kws = {
+        "acq": ["acquisition", "business combination", "purchase price allocation", "goodwill", "intangible assets", "earnout", "contingent consideration", "integration costs", "synergy", "pro forma", "acquired revenue", "acquired business"],
+        "nonrecurring": ["non-recurring", "one-time", "unusual item", "special item", "restructuring", "severance", "impairment", "write-down", "litigation settlement", "gain on sale", "divestiture", "discontinued operations", "held for sale"],
+        "accounting": ["accounting change", "change in accounting principle", "change in estimate", "adoption of new accounting standard", "asu", "restatement", "correction of error", "material weakness", "internal control", "reclassification", "retrospective adjustment"],
+        "extraordinary": ["extraordinary", "unusual", "infrequent", "non-core", "transformation program", "strategic review", "exit costs", "spin-off", "carve-out"],
+    }
+    flags = [
+        ("Acquisition and business combination language detected", kws["acq"]),
+        ("Impairment / write-down language detected", ["impairment", "write-down", "write off"]),
+        ("Restructuring language detected", ["restructuring", "severance", "exit costs", "transformation program"]),
+        ("Accounting change affects comparability", ["accounting change", "change in accounting principle", "asu", "retrospective adjustment"]),
+        ("Restatement / material weakness requires manual review", ["restatement", "correction of error", "material weakness", "internal control"]),
+        ("Discontinued operations / divestiture language detected", ["discontinued operations", "divestiture", "held for sale", "spin-off", "carve-out"]),
+        ("Litigation settlement or unusual item detected", ["litigation settlement", "unusual item", "special item", "extraordinary"]),
+    ]
+    out = _analyze_text_block(filing_text, kws, flags)
+    out["short_findings"] = out.get("flags", [])[:5]
+    return out
+
+
+def analyze_special_items_and_acquisitions(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.DataFrame, filing_text: str, quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out = default_special_items_analysis()
+    metric_names = {
+        "acquisitions_cash_paid": ["Acquisition Of Business", "Business Acquisitions", "Purchase Of Business", "Purchases Of Businesses", "Net Business Purchase And Sale"],
+        "divestiture_proceeds": ["Sale Of Business", "Proceeds From Divestitures", "Net Business Purchase And Sale"],
+        "gain_loss_on_sale_of_business": ["Gain On Sale Of Business", "Gain On Sale Of Assets"],
+        "restructuring_charges": ["Restructuring And Mergern Acquisition", "Restructuring Charges"],
+        "impairment_charges": ["Impairment Of Capital Assets", "Asset Impairment Charge"],
+        "asset_write_downs": ["Write Off"],
+        "litigation_settlements": ["Litigation Settlement"],
+        "discontinued_operations": ["Discontinued Operations"],
+        "unusual_items": ["Unusual Items"],
+        "special_items": ["Special Income Charges"],
+        "other_income_expense": ["Other Income Expense"],
+        "non_operating_income": ["Other Non Operating Income Expenses"],
+        "change_in_accounting_principle": ["Change In Accounting Principle"],
+        "cumulative_effect_of_accounting_change": ["Cumulative Effect Of Accounting Change"],
+    }
+    values={}
+    for k, names in metric_names.items():
+        values[k] = latest_from_series(get_series(cf, names))
+        if values[k] is None:
+            values[k] = latest_from_series(get_series(fin, names))
+        if values[k] is None:
+            values[k] = latest_from_series(get_series(bs, names))
+    revenue = latest_from_series(get_series(fin, ["Total Revenue"]))
+    net_income = latest_from_series(get_series(fin, ["Net Income"]))
+    cfo = latest_from_series(get_series(cf, ["Operating Cash Flow"]))
+    operating_income = latest_from_series(get_series(fin, ["Operating Income", "EBIT"]))
+    total_assets = latest_from_series(get_series(bs, ["Total Assets"]))
+    acquisition_total = safe_add(values.get("acquisitions_cash_paid"), values.get("divestiture_proceeds"))
+    special_total = safe_add(values.get("special_items"), values.get("unusual_items"), values.get("other_income_expense"), values.get("litigation_settlements"), values.get("asset_write_downs"), values.get("impairment_charges"), values.get("restructuring_charges"), values.get("discontinued_operations"))
+    metrics = {
+        "acquisitions_to_cfo": safe_div(safe_abs(acquisition_total), safe_abs(cfo)),
+        "acquisitions_to_revenue": safe_div(safe_abs(acquisition_total), safe_abs(revenue)),
+        "special_items_to_net_income": safe_div(safe_abs(special_total), safe_abs(net_income)),
+        "non_operating_income_to_net_income": safe_div(safe_abs(values.get("non_operating_income")), safe_abs(net_income)),
+        "restructuring_to_operating_income": safe_div(safe_abs(values.get("restructuring_charges")), safe_abs(operating_income)),
+        "impairment_to_assets": safe_div(safe_abs(values.get("impairment_charges")), safe_abs(total_assets)),
+        "divestiture_gains_to_net_income": safe_div(safe_abs(values.get("gain_loss_on_sale_of_business")), safe_abs(net_income)),
+    }
+    text = analyze_special_items_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"short_findings":[],"excerpt_windows":[],"manual_review_priority":"High"}
+    susp=[]; normal=[]; flags=[]; score=0
+    if safe_gt(metrics["acquisitions_to_cfo"], 0.5): flags.append("Acquisitions are material relative to CFO"); susp.append(flags[-1]); score += 20
+    if safe_gt(metrics["acquisitions_to_revenue"], 0.15): flags.append("Acquisition-driven growth may obscure organic performance"); susp.append(flags[-1]); score += 15
+    if "goodwill" in [h.lower() for h in text.get("keyword_hits",[])]: flags.append("Large goodwill/intangible build-up requires impairment review"); susp.append(flags[-1]); score += 10
+    if safe_gt(metrics["restructuring_to_operating_income"], 0.1): flags.append("Restructuring charges may be recurring despite being presented as one-time"); susp.append(flags[-1]); score += 15
+    if any(x in " ".join(text.get("keyword_hits",[])).lower() for x in ["impairment","write-down"]): flags.append("Impairment / write-down language detected"); susp.append(flags[-1]); score += 10
+    if safe_gt(metrics["non_operating_income_to_net_income"], 0.2): flags.append("Non-operating income materially supports earnings"); susp.append(flags[-1]); score += 12
+    if safe_gt(metrics["divestiture_gains_to_net_income"], 0.2): flags.append("Divestiture gains may inflate net income"); susp.append(flags[-1]); score += 12
+    if any(k in " ".join(text.get("keyword_hits",[])).lower() for k in ["accounting change", "change in accounting principle", "asu"]): flags.append("Accounting change or ASU adoption affects comparability"); susp.append(flags[-1]); score += 10
+    if "discontinued operations" in " ".join(text.get("keyword_hits",[])).lower(): flags.append("Discontinued operations affect period comparability"); susp.append(flags[-1]); score += 8
+    if any(k in " ".join(text.get("keyword_hits",[])).lower() for k in ["litigation settlement", "unusual item"]): flags.append("Litigation settlement or unusual item affects earnings quality"); susp.append(flags[-1]); score += 8
+    if any(k in " ".join(text.get("keyword_hits",[])).lower() for k in ["restatement", "correction of error", "material weakness"]): flags.append("Restatement / correction / material weakness language requires manual review"); susp.append(flags[-1]); score += 20
+    if not susp: normal.append("No major acquisition or special item anomalies detected in available data")
+    level = "High" if score >= 55 else "Medium" if score >= 25 else "Low"
+    data_status = "Complete" if all(v is not None for v in metrics.values()) else "Partial" if any(v is not None for v in metrics.values()) else "Unavailable"
+    if data_status == "Unavailable": level = "Unknown"
+    out.update({"risk_level": level, "score": min(score,100) if data_status != "Unavailable" else None, "metrics": metrics, "flags": list(dict.fromkeys(flags+text.get("flags",[]))), "normal_signals": normal, "suspicious_signals": susp, "text_findings": text.get("short_findings",[]), "excerpt_windows": text.get("excerpt_windows",[])[:6], "data_status": data_status, "raw_metrics": values, "acquisition_risk": "High" if safe_gt(metrics["acquisitions_to_cfo"],0.5) or safe_gt(metrics["acquisitions_to_revenue"],0.15) else "Unknown" if data_status=="Unavailable" else "Low", "accounting_change_flag": "Yes" if any(k in " ".join(text.get("keyword_hits",[])).lower() for k in ["accounting change","change in accounting principle","asu","restatement","material weakness"]) else "No" if data_status!="Unavailable" else "Unavailable", "main_special_item_finding": (list(dict.fromkeys(flags+text.get("flags",[]))) or ["Unavailable"])[0]})
+    return out
+
+
 def build_filing_text_forensic_score(text_analyses: dict[str, Any]) -> dict[str, Any]:
     if not text_analyses:
         return {"filing_text_score":None,"filing_text_risk_level":"Unknown","top_text_red_flags":["SEC filing text unavailable"],"most_relevant_excerpts":[],"filing_sources":[]}
@@ -459,6 +579,13 @@ def build_investment_view(mods: dict[str, Any], completeness: dict[str, Any]) ->
     risks = []
     if completeness["level"] == "Weak":
         risks.append("Data completeness is Weak")
+    special = mods.get("special_items_analysis", {})
+    if special.get("risk_level") == "High":
+        risks.append("special items risk is High")
+    if special.get("acquisition_risk") == "High":
+        risks.append("acquisition dependency is High")
+    if special.get("accounting_change_flag") == "Yes":
+        risks.append("accounting change / restatement language detected")
     for k in ["tax_analysis", "quarterly_analysis", "inventory_analysis", "receivables_analysis", "debt_analysis"]:
         if mods[k].get("risk_level") == "High" or mods[k].get("tax_risk_level") == "High" or mods[k].get("quarterly_risk_level") == "High":
             risks.append(f"{k} is High")
@@ -507,6 +634,7 @@ def home() -> str:
       <section class="card span-8"><div class="k">Investment View</div><div id="invest"></div></section>
       <section class="card span-4"><div class="k">Data Completeness</div><div id="complete"></div></section>
       <section class="card span-12"><div class="k">SEC Filing Intelligence</div><div id="filingintel"></div></section>
+      <section class="card span-12"><div class="k">Acquisitions, Nonrecurring & Accounting Changes</div><div id="specialitems"></div></section>
       <section class="card span-12"><div class="k">Screener</div><div id="screener" class="loading">Loading screener...</div></section>
     </div>
   </div>
@@ -527,12 +655,13 @@ async function analyze(){
 }
 
 function render(d){
-  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{};
+  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{}, sp=d.special_items_analysis||{};
   $('topCards').innerHTML = `
     <div class="card span-3"><div class="k">Ticker</div><div class="v mono">${d.ticker||'—'}</div></div>
     <div class="card span-3"><div class="k">Tax Risk</div><div class="v">${pill(tax.tax_risk_level)}</div></div>
     <div class="card span-3"><div class="k">Quarterly Risk</div><div class="v">${pill(q.quarterly_risk_level)}</div></div>
-    <div class="card span-3"><div class="k">Debt Risk</div><div class="v">${pill(debt.risk_level)}</div></div>`;
+    <div class="card span-3"><div class="k">Debt Risk</div><div class="v">${pill(debt.risk_level)}</div></div>
+    <div class="card span-3"><div class="k">Special Items Risk</div><div class="v">${pill(sp.risk_level)}</div></div>`;
 
   const tr=(tax.rows&&tax.rows[0])||{};
   $('tax').innerHTML = `<table><tr><th>Metric</th><th>Value</th></tr>
@@ -559,6 +688,8 @@ function render(d){
   const diag=filing.diagnostics||{};
   const link=(u)=>u?`<a href="${u}" target="_blank">Open SEC filing</a>`:'—';
   const unavailableMsg=(!diag.filing_text_downloaded)?'<div class="muted">SEC filing unavailable - check CIK mapping or SEC request</div>':'';
+  $('specialitems').innerHTML = `<div>${pill(sp.risk_level)} Score: ${n(sp.score)}</div><table><tr><th>Metric</th><th>Value</th></tr>${Object.entries(sp.metrics||{}).map(([k,v])=>`<tr><td>${k}</td><td>${n(v)}</td></tr>`).join('')}</table><div class='k' style='margin-top:10px'>Top Findings</div>${reasonList((sp.flags||[]).slice(0,5))}<div class='k' style='margin-top:10px'>Special Item Flags</div>${reasonList(sp.suspicious_signals)}<div class='k' style='margin-top:10px'>Accounting Change Flags</div>${reasonList((sp.flags||[]).filter(x=>/accounting|restatement|material weakness/i.test(x)))}<div class='k' style='margin-top:10px'>Acquisition Flags</div>${reasonList((sp.flags||[]).filter(x=>/acquisition|goodwill|organic/i.test(x)))}<div class='k' style='margin-top:10px'>Short Excerpts</div>${reasonList((sp.excerpt_windows||[]).slice(0,3))}<details><summary>Raw excerpts</summary>${reasonList(sp.excerpt_windows)}</details>`;
+
   $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>${unavailableMsg}
   <table><tr><th>Form</th><th>Date</th><th>Link</th></tr><tr><td>10-K</td><td>${k.filing_date||'—'}</td><td>${link(k.filing_url)}</td></tr><tr><td>10-Q</td><td>${qf.filing_date||'—'}</td><td>${link(qf.filing_url)}</td></tr></table>
   <div class="k" style="margin-top:10px">Top Red Flags</div>${reasonList(fs.top_text_red_flags)}
@@ -577,8 +708,8 @@ async function loadScreener(){
   try{
     const r=await fetch('/api/screener'); const d=await r.json();
     const rows=d.rows||[];
-    el.innerHTML = `<table><tr><th>Ticker</th><th>Tax Risk</th><th>Quarterly Risk</th><th>Debt Risk</th><th>Filing Text Risk</th><th>Top Text Flag</th><th>Latest 10-K Date</th><th>Latest 10-Q Date</th><th>Forensic View</th><th>Confidence</th><th>Completeness</th><th>Main Reason</th></tr>
-      ${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Quarterly Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${pill(x['Filing Text Risk'])}</td><td>${x['Top Text Flag']||'—'}</td><td>${x['Latest 10-K Date']||'—'}</td><td>${x['Latest 10-Q Date']||'—'}</td><td>${x['Forensic View']||'—'}</td><td>${x.Confidence||'—'}</td><td>${pill(x['Data Completeness'])}</td><td>${x['Main Reason']||'—'}</td></tr>`).join('')}</table>`;
+    el.innerHTML = `<table><tr><th>Ticker</th><th>Tax Risk</th><th>Quarterly Risk</th><th>Debt Risk</th><th>Filing Text Risk</th><th>Special Items Risk</th><th>Acquisition Risk</th><th>Accounting Change Flag</th><th>Main Special Item Finding</th><th>Top Text Flag</th><th>Latest 10-K Date</th><th>Latest 10-Q Date</th><th>Forensic View</th><th>Confidence</th><th>Completeness</th><th>Main Reason</th></tr>
+      ${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Quarterly Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${pill(x['Filing Text Risk'])}</td><td>${pill(x['Special Items Risk'])}</td><td>${pill(x['Acquisition Risk'])}</td><td>${x['Accounting Change Flag']||'—'}</td><td>${x['Main Special Item Finding']||'—'}</td><td>${x['Top Text Flag']||'—'}</td><td>${x['Latest 10-K Date']||'—'}</td><td>${x['Latest 10-Q Date']||'—'}</td><td>${x['Forensic View']||'—'}</td><td>${x.Confidence||'—'}</td><td>${pill(x['Data Completeness'])}</td><td>${x['Main Reason']||'—'}</td></tr>`).join('')}</table>`;
   }catch(e){ el.textContent='Screener failed: '+e.message; }
   finally{ el.classList.remove('loading'); }
 }
@@ -600,6 +731,7 @@ def api_analyze():
     debt_analysis = default_debt_analysis()
     macro_analysis = default_macro_analysis()
     investment_view = default_investment_view()
+    special_items_analysis = default_special_items_analysis()
     try:
         tk = yf.Ticker(ticker)
         fin, cf, bs = tk.financials, tk.cashflow, tk.balance_sheet
@@ -629,6 +761,7 @@ def api_analyze():
         inv_text = analyze_inventory_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         debt_text = analyze_debt_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         rev_text = analyze_revenue_and_nonrecurring_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
+        special_items_analysis = analyze_special_items_and_acquisitions(fin, cf, bs, filing_text, quality_rows)
         filing_text_summary = build_filing_text_forensic_score({"tax":tax_text,"receivables":recv_text,"inventory":inv_text,"debt":debt_text,"revenue_nonrecurring":rev_text,"sources":filing_sources})
         if not filing_text:
             filing_text_summary = {"filing_text_score": None, "filing_text_risk_level": "Unknown", "top_text_red_flags": ["SEC filing text unavailable"], "most_relevant_excerpts": [], "filing_sources": filing_sources}
@@ -645,14 +778,14 @@ def api_analyze():
         filing_diagnostics = {"cik_found": bool(filing_10k.get("cik") or filing_10q.get("cik")), "submissions_loaded": bool((filing_10k.get("cik") or filing_10q.get("cik")) and (get_sec_submissions((filing_10k.get("cik") or filing_10q.get("cik"))) is not None)), "latest_10k_found": bool(filing_10k.get("available")), "latest_10q_found": bool(filing_10q.get("available")), "filing_text_downloaded": bool(filing_text), "error": None}
         out = {"ticker": ticker, "tax_analysis": tax_analysis, "quarterly_analysis": quarterly_analysis, "inventory_analysis": inventory_analysis,
                "receivables_analysis": receivables_analysis, "debt_analysis": debt_analysis, "macro_analysis": macro_analysis,
-               "investment_view": investment_view, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "summary": filing_text_summary}}
+               "investment_view": investment_view, "special_items_analysis": special_items_analysis, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "special_items": analyze_special_items_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"short_findings":[],"excerpt_windows":[],"manual_review_priority":"High"}, "summary": filing_text_summary}}
         return jsonify(out)
     except Exception as e:
         print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
         traceback.print_exc()
         return jsonify({"ticker": ticker, "tax_analysis": tax_analysis, "quarterly_analysis": quarterly_analysis, "inventory_analysis": inventory_analysis,
                         "receivables_analysis": receivables_analysis, "debt_analysis": debt_analysis, "macro_analysis": macro_analysis,
-                        "investment_view": investment_view, "error": f"{type(e).__name__}: {e}"})
+                        "investment_view": investment_view, "special_items_analysis": special_items_analysis, "error": f"{type(e).__name__}: {e}"})
 
 
 @app.route('/api/screener')
@@ -664,7 +797,8 @@ def api_screener():
             data = app.test_client().get(f"/api/analyze?ticker={ticker}&period=5y").get_json()
             filing = data.get("sec_filing_intelligence", {})
             summary = filing.get("summary", {})
-            rows.append({"Ticker": ticker, "Tax Risk": data["tax_analysis"].get("tax_risk_level", "Unknown"), "Quarterly Risk": data["quarterly_analysis"].get("quarterly_risk_level", "Unknown"), "Debt Risk": data["debt_analysis"].get("risk_level", "Unknown"), "Filing Text Risk": summary.get("filing_text_risk_level", "Unknown"), "Top Text Flag": (summary.get("top_text_red_flags") or ["Unavailable"])[0], "Latest 10-K Date": filing.get("latest_10k", {}).get("filing_date"), "Latest 10-Q Date": filing.get("latest_10q", {}).get("filing_date"), "Forensic View": data["investment_view"].get("forensic_view", "INCONCLUSIVE"), "Confidence": data["investment_view"].get("confidence", "Low"), "Data Completeness": data["data_completeness"].get("level", "Weak"), "Main Reason": (data["tax_analysis"].get("reason_codes") or ["Unavailable"])[0]})
+            special = data.get("special_items_analysis", {})
+            rows.append({"Ticker": ticker, "Tax Risk": data["tax_analysis"].get("tax_risk_level", "Unknown"), "Quarterly Risk": data["quarterly_analysis"].get("quarterly_risk_level", "Unknown"), "Debt Risk": data["debt_analysis"].get("risk_level", "Unknown"), "Filing Text Risk": summary.get("filing_text_risk_level", "Unknown"), "Special Items Risk": special.get("risk_level", "Unknown"), "Acquisition Risk": special.get("acquisition_risk", "Unknown"), "Accounting Change Flag": special.get("accounting_change_flag", "Unavailable"), "Main Special Item Finding": special.get("main_special_item_finding", "Unavailable"), "Top Text Flag": (summary.get("top_text_red_flags") or ["Unavailable"])[0], "Latest 10-K Date": filing.get("latest_10k", {}).get("filing_date"), "Latest 10-Q Date": filing.get("latest_10q", {}).get("filing_date"), "Forensic View": data["investment_view"].get("forensic_view", "INCONCLUSIVE"), "Confidence": data["investment_view"].get("confidence", "Low"), "Data Completeness": data["data_completeness"].get("level", "Weak"), "Main Reason": (data["tax_analysis"].get("reason_codes") or ["Unavailable"])[0]})
         except Exception as e:
             print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
             traceback.print_exc()
