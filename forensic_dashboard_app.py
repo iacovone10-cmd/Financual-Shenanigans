@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import traceback
 from datetime import datetime
 from typing import Any
@@ -12,6 +13,9 @@ from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 SEC_HEADERS = {"User-Agent": "FinancialShenanigans research@example.com"}
+SEC_SUBMISSIONS_CACHE: dict[str, dict[str, Any]] = {}
+SEC_FILING_TEXT_CACHE: dict[str, dict[str, Any]] = {}
+SEC_COMPANY_FACTS_CACHE: dict[str, dict[str, Any]] = {}
 
 # -------------------------- Safe helpers --------------------------
 def safe_float(x: Any) -> float | None:
@@ -131,13 +135,19 @@ def latest_from_series(s: pd.Series | None) -> float | None:
 
 
 def get_sec_company_facts(ticker: str) -> dict[str, Any] | None:
+    if ticker in SEC_COMPANY_FACTS_CACHE:
+        return SEC_COMPANY_FACTS_CACHE[ticker]
     try:
         cik = yf.Ticker(ticker).info.get("cik")
         if cik is None:
             return None
         url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
         r = requests.get(url, headers=SEC_HEADERS, timeout=20)
-        return r.json() if r.ok else None
+        if not r.ok:
+            return None
+        payload = r.json()
+        SEC_COMPANY_FACTS_CACHE[ticker] = payload
+        return payload
     except Exception as e:
         print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
         traceback.print_exc()
@@ -182,6 +192,163 @@ def extract_tax_rows_from_sec(ticker: str) -> list[dict[str, Any]]:
     pretax, tax = p.get("val"), t.get("val")
     return [{"period": p.get("period") or t.get("period"), "pretax_income": pretax, "income_tax_expense": tax, "current_tax_expense": t.get("val"), "deferred_tax_expense": None, "cash_taxes_paid": None, "deferred_tax_assets": None, "deferred_tax_liabilities": None, "valuation_allowance": None, "unrecognized_tax_benefits": None, "etr": safe_div(tax, pretax) if safe_gt(pretax, 0) else None, "cash_tax_ratio": None, "cash_tax_rate": None, "deferred_tax_dependency": None, "source": "SEC Company Facts"}]
 
+
+
+
+def get_cik_from_ticker(ticker: str) -> str | None:
+    try:
+        cik = yf.Ticker(ticker).info.get("cik")
+        return f"{int(cik):010d}" if cik is not None else None
+    except Exception:
+        return None
+
+
+def get_sec_submissions(cik: str) -> dict[str, Any] | None:
+    if cik in SEC_SUBMISSIONS_CACHE:
+        return SEC_SUBMISSIONS_CACHE[cik]
+    try:
+        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        r = requests.get(url, headers=SEC_HEADERS, timeout=20)
+        if not r.ok:
+            return None
+        payload = r.json()
+        SEC_SUBMISSIONS_CACHE[cik] = payload
+        return payload
+    except Exception as e:
+        print(f"[ERROR] SEC submissions {cik}: {e}")
+        return None
+
+
+def get_latest_filing_metadata(ticker: str, form_type: str) -> dict[str, Any]:
+    cik = get_cik_from_ticker(ticker)
+    if not cik:
+        return {"form": form_type, "available": False}
+    subs = get_sec_submissions(cik)
+    if not subs:
+        return {"form": form_type, "available": False, "cik": cik}
+    recent = subs.get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    for idx, form in enumerate(forms):
+        if form != form_type:
+            continue
+        accession = recent.get("accessionNumber", [None])[idx]
+        primary_doc = recent.get("primaryDocument", [None])[idx]
+        filing_date = recent.get("filingDate", [None])[idx]
+        accession_no_dash = (accession or "").replace("-", "")
+        filing_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_no_dash}/{primary_doc}" if accession and primary_doc else None
+        return {"form": form_type, "cik": cik, "filing_date": filing_date, "accession_number": accession, "primary_document": primary_doc, "filing_url": filing_url, "available": bool(filing_url)}
+    return {"form": form_type, "cik": cik, "available": False}
+
+
+def download_sec_filing_html(filing_url: str | None) -> str:
+    if not filing_url:
+        return ""
+    if filing_url in SEC_FILING_TEXT_CACHE:
+        return SEC_FILING_TEXT_CACHE[filing_url].get("html", "")
+    try:
+        r = requests.get(filing_url, headers=SEC_HEADERS, timeout=25)
+        html = r.text if r.ok else ""
+        SEC_FILING_TEXT_CACHE[filing_url] = {"html": html}
+        return html
+    except Exception as e:
+        print(f"[ERROR] SEC filing download failed: {e}")
+        return ""
+
+
+def clean_sec_html_to_text(html: str) -> str:
+    if not html:
+        return ""
+    text = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text[:400000]
+
+
+def _extract_keyword_window(text: str, keyword: str, window: int = 1500) -> list[str]:
+    hits = []
+    for m in re.finditer(re.escape(keyword), text, flags=re.I):
+        start = max(0, m.start() - window)
+        end = min(len(text), m.end() + window)
+        hits.append(text[start:end])
+        if len(hits) >= 2:
+            break
+    return hits
+
+
+def extract_filing_sections(text: str) -> dict[str, str]:
+    patterns = {"md&a": ["management's discussion", "md&a", "liquidity and capital resources"], "risk_factors": ["risk factors"], "notes_financials": ["notes to consolidated financial statements"], "income_taxes": ["income taxes", "effective tax rate"], "revenue": ["revenue recognition", "contract liabilities"], "receivables": ["allowance for doubtful accounts", "credit losses"], "inventory": ["inventory", "inventories"], "debt": ["debt", "borrowings", "revolving credit"], "legal": ["legal proceedings", "litigation"], "subsequent_events": ["subsequent events"]}
+    out = {}
+    low = text.lower()
+    for name, keys in patterns.items():
+        section = ""
+        for k in keys:
+            idx = low.find(k)
+            if idx >= 0:
+                section = text[max(0, idx-1500): min(len(text), idx+1500)]
+                break
+        out[name] = section
+    return out
+
+
+def _analyze_text_block(filing_text: str, keyword_map: dict[str, list[str]], flag_map: list[tuple[str, list[str]]]) -> dict[str, Any]:
+    low = filing_text.lower()
+    hits, excerpts, flags = [], [], []
+    for group, kws in keyword_map.items():
+        for kw in kws:
+            if kw in low:
+                hits.append(kw)
+                excerpts.extend(_extract_keyword_window(filing_text, kw))
+    for flag, kws in flag_map:
+        if any(k in low for k in kws):
+            flags.append(flag)
+    hits = sorted(set(hits))
+    excerpts = excerpts[:6]
+    risk = "High" if len(flags) >= 4 else "Medium" if flags else "Low"
+    priority = "High" if risk == "High" else "Medium" if risk == "Medium" else "Low"
+    return {"risk_level": risk, "flags": flags, "keyword_hits": hits, "excerpt_windows": excerpts, "manual_review_priority": priority}
+
+
+def analyze_tax_footnote_text(filing_text: str) -> dict[str, Any]:
+    kws = {"tax": ["effective tax rate","income tax expense","tax provision","tax benefit","deferred tax","deferred tax assets","deferred tax liabilities","valuation allowance","unrecognized tax benefits","tax credits","tax loss carryforwards","net operating loss","tax receivable","uncertain tax positions","foreign tax","repatriation","tax audit","tax settlement"]}
+    flags = [("Valuation allowance mentioned", ["valuation allowance"]),("Unrecognized tax benefits mentioned", ["unrecognized tax benefits","uncertain tax positions"]),("Deferred tax complexity detected", ["deferred tax assets","deferred tax liabilities","deferred tax"]),("Tax benefit language detected", ["tax benefit"]),("Effective tax rate reconciliation requires manual review", ["effective tax rate"]),("Tax loss carryforward dependency detected", ["tax loss carryforwards","net operating loss"]),("Potential book-vs-tax complexity", ["tax provision","foreign tax","repatriation"])]
+    r = _analyze_text_block(filing_text, kws, flags)
+    return {"tax_text_risk_level": r["risk_level"], "tax_text_flags": r["flags"], "tax_keyword_hits": r["keyword_hits"], "tax_excerpt_windows": r["excerpt_windows"], "manual_review_priority": r["manual_review_priority"]}
+
+
+def analyze_receivables_footnote_text(filing_text: str) -> dict[str, Any]:
+    kws = {"recv": ["allowance for doubtful accounts","doubtful accounts","expected credit losses","credit losses","bad debt expense","write-offs","allowance methodology","aging of receivables","customer concentration","changes in payment terms","collection risk"]}
+    flags = [("Allowance methodology disclosed", ["allowance methodology","allowance for doubtful accounts"]),("Credit loss risk language detected", ["expected credit losses","credit losses"]),("Receivables aging / collection risk mentioned", ["aging of receivables","collection risk"]),("Customer concentration risk mentioned", ["customer concentration"]),("Bad debt / write-off language detected", ["bad debt expense","write-offs"])]
+    return _analyze_text_block(filing_text, kws, flags)
+
+
+def analyze_inventory_footnote_text(filing_text: str) -> dict[str, Any]:
+    kws={"inv":["inventories","finished goods","work in process","raw materials","lower of cost or net realizable value","lower of cost or market","inventory write-down","obsolescence","excess inventory","slow-moving inventory","demand uncertainty","channel inventory","backlog"]}
+    flags=[("Inventory write-down language detected", ["inventory write-down"]),("Obsolescence reserve mentioned", ["obsolescence"]),("Finished goods / WIP / raw materials breakdown mentioned", ["finished goods","work in process","raw materials"]),("Demand uncertainty linked to inventory", ["demand uncertainty","slow-moving inventory","excess inventory"]),("Channel inventory risk mentioned", ["channel inventory"])]
+    return _analyze_text_block(filing_text,kws,flags)
+
+def analyze_debt_footnote_text(filing_text: str) -> dict[str, Any]:
+    kws={"debt":["debt","borrowings","notes payable","senior notes","revolving credit facility","covenants","maturity","variable rate","fixed rate","interest rate","refinancing","liquidity","going concern","off-balance sheet","lease obligations"]}
+    flags=[("Debt maturity schedule requires review", ["maturity"]),("Covenant language detected", ["covenants"]),("Variable rate exposure detected", ["variable rate"]),("Refinancing risk language detected", ["refinancing"]),("Liquidity pressure language detected", ["liquidity","going concern"]),("Off-balance-sheet obligation language detected", ["off-balance sheet","lease obligations"])]
+    return _analyze_text_block(filing_text,kws,flags)
+
+def analyze_revenue_and_nonrecurring_text(filing_text: str) -> dict[str, Any]:
+    kws={"rev":["revenue recognition","remaining performance obligations","contract assets","contract liabilities","bill-and-hold","channel stuffing","returns","rebates","discounts","deferred revenue","customer incentives","restructuring","impairment","gain on sale","divestiture","fair value gain","litigation settlement","one-time","non-recurring","unusual item","discontinued operations"]}
+    flags=[("Revenue recognition complexity detected", ["revenue recognition","bill-and-hold","channel stuffing"]),("Contract asset / liability language detected", ["contract assets","contract liabilities","deferred revenue"]),("Customer incentives / rebates may affect revenue quality", ["customer incentives","rebates","discounts","returns"]),("Nonrecurring item language detected", ["one-time","non-recurring","unusual item","discontinued operations"]),("Restructuring / impairment language detected", ["restructuring","impairment"]),("Gain on sale / divestiture language detected", ["gain on sale","divestiture","fair value gain"])]
+    return _analyze_text_block(filing_text,kws,flags)
+
+def build_filing_text_forensic_score(text_analyses: dict[str, Any]) -> dict[str, Any]:
+    if not text_analyses:
+        return {"filing_text_score":0,"filing_text_risk_level":"Unknown","top_text_red_flags":["SEC filing text unavailable"],"most_relevant_excerpts":[],"filing_sources":[]}
+    score=0; flags=[]; excerpts=[]
+    for key in ["tax","receivables","inventory","debt","revenue_nonrecurring"]:
+        a=text_analyses.get(key,{})
+        r=a.get("risk_level") or a.get("tax_text_risk_level")
+        score += 20 if r=="High" else 10 if r=="Medium" else 2 if r=="Low" else 0
+        flags.extend(a.get("flags",[])+a.get("tax_text_flags",[]))
+        excerpts.extend(a.get("excerpt_windows",[])+a.get("tax_excerpt_windows",[]))
+    level="High" if score>=60 else "Medium" if score>=30 else "Low"
+    return {"filing_text_score": min(score,100), "filing_text_risk_level": level, "top_text_red_flags": list(dict.fromkeys(flags))[:8], "most_relevant_excerpts": excerpts[:8], "filing_sources": text_analyses.get("sources", [])}
 
 def analyze_tax_quality(tax_rows: list[dict[str, Any]], quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
     out = default_tax_analysis()
@@ -316,6 +483,7 @@ def home() -> str:
       <section class="card span-12"><div class="k">Quarterly Analysis</div><div id="quarterly"></div></section>
       <section class="card span-8"><div class="k">Investment View</div><div id="invest"></div></section>
       <section class="card span-4"><div class="k">Data Completeness</div><div id="complete"></div></section>
+      <section class="card span-12"><div class="k">SEC Filing Intelligence</div><div id="filingintel"></div></section>
       <section class="card span-12"><div class="k">Screener</div><div id="screener" class="loading">Loading screener...</div></section>
     </div>
   </div>
@@ -336,7 +504,7 @@ async function analyze(){
 }
 
 function render(d){
-  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{};
+  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{};
   $('topCards').innerHTML = `
     <div class="card span-3"><div class="k">Ticker</div><div class="v mono">${d.ticker||'—'}</div></div>
     <div class="card span-3"><div class="k">Tax Risk</div><div class="v">${pill(tax.tax_risk_level)}</div></div>
@@ -363,15 +531,28 @@ function render(d){
   <div class="k" style="margin-top:10px">What Would Change View</div>${reasonList(inv.what_would_change_view)}`;
 
   $('complete').innerHTML = `<div class="v">${n(comp.score)} / 100</div><div>${pill(comp.level)}</div><div class="k" style="margin-top:10px">Missing Fields</div>${reasonList(comp.missing_fields)}`;
+
+  const k=filing.latest_10k||{}, qf=filing.latest_10q||{};
+  const link=(u)=>u?`<a href="${u}" target="_blank">Open SEC filing</a>`:'—';
+  $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>
+  <table><tr><th>Form</th><th>Date</th><th>Link</th></tr><tr><td>10-K</td><td>${k.filing_date||'—'}</td><td>${link(k.filing_url)}</td></tr><tr><td>10-Q</td><td>${qf.filing_date||'—'}</td><td>${link(qf.filing_url)}</td></tr></table>
+  <div class="k" style="margin-top:10px">Top Red Flags</div>${reasonList(fs.top_text_red_flags)}
+  <div class="k" style="margin-top:10px">Extracted Excerpts</div>${reasonList(fs.most_relevant_excerpts)}
+  <div class="k" style="margin-top:10px">Tax Footnote Intelligence</div>${reasonList((filing.tax||{}).tax_text_flags)}
+  <div class="k" style="margin-top:10px">Receivables / Allowance Intelligence</div>${reasonList((filing.receivables||{}).flags)}
+  <div class="k" style="margin-top:10px">Inventory Footnote Intelligence</div>${reasonList((filing.inventory||{}).flags)}
+  <div class="k" style="margin-top:10px">Debt & Liquidity Footnote Intelligence</div>${reasonList((filing.debt||{}).flags)}
+  <div class="k" style="margin-top:10px">Revenue Recognition & One-Off Items</div>${reasonList((filing.revenue_nonrecurring||{}).flags)}`;
 }
+
 
 async function loadScreener(){
   const el=$('screener'); el.classList.add('loading'); el.textContent='Loading screener...';
   try{
     const r=await fetch('/api/screener'); const d=await r.json();
     const rows=d.rows||[];
-    el.innerHTML = `<table><tr><th>Ticker</th><th>Tax Risk</th><th>Quarterly Risk</th><th>Debt Risk</th><th>Forensic View</th><th>Confidence</th><th>Completeness</th><th>Main Reason</th></tr>
-      ${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Quarterly Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${x['Forensic View']||'—'}</td><td>${x.Confidence||'—'}</td><td>${pill(x['Data Completeness'])}</td><td>${x['Main Reason']||'—'}</td></tr>`).join('')}</table>`;
+    el.innerHTML = `<table><tr><th>Ticker</th><th>Tax Risk</th><th>Quarterly Risk</th><th>Debt Risk</th><th>Filing Text Risk</th><th>Top Text Flag</th><th>Latest 10-K Date</th><th>Latest 10-Q Date</th><th>Forensic View</th><th>Confidence</th><th>Completeness</th><th>Main Reason</th></tr>
+      ${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Quarterly Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${pill(x['Filing Text Risk'])}</td><td>${x['Top Text Flag']||'—'}</td><td>${x['Latest 10-K Date']||'—'}</td><td>${x['Latest 10-Q Date']||'—'}</td><td>${x['Forensic View']||'—'}</td><td>${x.Confidence||'—'}</td><td>${pill(x['Data Completeness'])}</td><td>${x['Main Reason']||'—'}</td></tr>`).join('')}</table>`;
   }catch(e){ el.textContent='Screener failed: '+e.message; }
   finally{ el.classList.remove('loading'); }
 }
@@ -411,10 +592,29 @@ def api_analyze():
         }
         completeness = calculate_data_completeness(data_probe)
         macro_analysis = build_macro_regime_context()
+        filing_10k = get_latest_filing_metadata(ticker, "10-K")
+        filing_10q = get_latest_filing_metadata(ticker, "10-Q")
+        filing_sources = [x for x in [filing_10k.get("filing_url"), filing_10q.get("filing_url")] if x]
+        filing_text = clean_sec_html_to_text(download_sec_filing_html(filing_10k.get("filing_url")) + " " + download_sec_filing_html(filing_10q.get("filing_url")))
+        tax_text = analyze_tax_footnote_text(filing_text) if filing_text else {"tax_text_risk_level":"Unknown","tax_text_flags":["SEC filing text unavailable"],"tax_keyword_hits":[],"tax_excerpt_windows":[],"manual_review_priority":"High"}
+        recv_text = analyze_receivables_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
+        inv_text = analyze_inventory_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
+        debt_text = analyze_debt_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
+        rev_text = analyze_revenue_and_nonrecurring_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
+        filing_text_summary = build_filing_text_forensic_score({"tax":tax_text,"receivables":recv_text,"inventory":inv_text,"debt":debt_text,"revenue_nonrecurring":rev_text,"sources":filing_sources})
+        tax_analysis["tax_text_flags"] = tax_text.get("tax_text_flags",[])
+        tax_analysis["tax_excerpt_windows"] = tax_text.get("tax_excerpt_windows",[])
+        tax_analysis["sec_filing_sources"] = filing_sources
+        receivables_analysis.update(recv_text)
+        inventory_analysis.update(inv_text)
+        debt_analysis["text_signals"] = debt_text
+        macro_analysis = build_macro_regime_context()
         investment_view = build_investment_view(locals(), completeness)
+        if filing_text_summary.get("filing_text_risk_level") == "High" and completeness.get("level") == "Weak":
+            investment_view["forensic_view"] = "INCONCLUSIVE"
         out = {"ticker": ticker, "tax_analysis": tax_analysis, "quarterly_analysis": quarterly_analysis, "inventory_analysis": inventory_analysis,
                "receivables_analysis": receivables_analysis, "debt_analysis": debt_analysis, "macro_analysis": macro_analysis,
-               "investment_view": investment_view, "data_completeness": completeness}
+               "investment_view": investment_view, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "summary": filing_text_summary}}
         return jsonify(out)
     except Exception as e:
         print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
@@ -431,7 +631,9 @@ def api_screener():
     for ticker in universe:
         try:
             data = app.test_client().get(f"/api/analyze?ticker={ticker}&period=5y").get_json()
-            rows.append({"Ticker": ticker, "Tax Risk": data["tax_analysis"].get("tax_risk_level", "Unknown"), "Quarterly Risk": data["quarterly_analysis"].get("quarterly_risk_level", "Unknown"), "Debt Risk": data["debt_analysis"].get("risk_level", "Unknown"), "Forensic View": data["investment_view"].get("forensic_view", "INCONCLUSIVE"), "Confidence": data["investment_view"].get("confidence", "Low"), "Data Completeness": data["data_completeness"].get("level", "Weak"), "Main Reason": (data["tax_analysis"].get("reason_codes") or ["Unavailable"])[0]})
+            filing = data.get("sec_filing_intelligence", {})
+            summary = filing.get("summary", {})
+            rows.append({"Ticker": ticker, "Tax Risk": data["tax_analysis"].get("tax_risk_level", "Unknown"), "Quarterly Risk": data["quarterly_analysis"].get("quarterly_risk_level", "Unknown"), "Debt Risk": data["debt_analysis"].get("risk_level", "Unknown"), "Filing Text Risk": summary.get("filing_text_risk_level", "Unknown"), "Top Text Flag": (summary.get("top_text_red_flags") or ["Unavailable"])[0], "Latest 10-K Date": filing.get("latest_10k", {}).get("filing_date"), "Latest 10-Q Date": filing.get("latest_10q", {}).get("filing_date"), "Forensic View": data["investment_view"].get("forensic_view", "INCONCLUSIVE"), "Confidence": data["investment_view"].get("confidence", "Low"), "Data Completeness": data["data_completeness"].get("level", "Weak"), "Main Reason": (data["tax_analysis"].get("reason_codes") or ["Unavailable"])[0]})
         except Exception as e:
             print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
             traceback.print_exc()
