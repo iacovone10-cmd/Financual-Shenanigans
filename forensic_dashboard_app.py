@@ -173,6 +173,33 @@ def latest_from_series(s: pd.Series | None) -> float | None:
     return safe_float(s.iloc[0])
 
 
+def get_period_config(period: str) -> dict[str, Any]:
+    normalized = (period or "5y").lower().strip()
+    mapping = {"1y": (1, 4), "3y": (3, 12), "5y": (5, 20)}
+    years, quarters = mapping.get(normalized, mapping["5y"])
+    return {"period": normalized if normalized in mapping else "5y", "years": years, "quarters": quarters}
+
+
+def limited_columns(df: pd.DataFrame | None, count: int) -> list[Any]:
+    if df is None or df.empty:
+        return []
+    return list(df.columns[:count])
+
+
+def build_quality_rows(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.DataFrame, years: int) -> list[dict[str, Any]]:
+    cols = limited_columns(fin, years)
+    rows = []
+    for p in cols:
+        rev = safe_float(fin.at["Total Revenue", p]) if "Total Revenue" in fin.index else None
+        ni = safe_float(fin.at["Net Income", p]) if "Net Income" in fin.index else None
+        cfo = safe_float(cf.at["Operating Cash Flow", p]) if not cf.empty and "Operating Cash Flow" in cf.index and p in cf.columns else None
+        capex = safe_float(cf.at["Capital Expenditure", p]) if not cf.empty and "Capital Expenditure" in cf.index and p in cf.columns else None
+        ar = safe_float(bs.at["Accounts Receivable", p]) if not bs.empty and "Accounts Receivable" in bs.index and p in bs.columns else None
+        inv = safe_float(bs.at["Inventory", p]) if not bs.empty and "Inventory" in bs.index and p in bs.columns else None
+        rows.append({"period": str(p.date()), "revenue": rev, "net_income": ni, "cfo": cfo, "capex": capex, "fcf": safe_sub(cfo, safe_abs_or_zero(capex)), "ar": ar, "inventory": inv})
+    return rows
+
+
 def get_sec_company_facts(ticker: str) -> dict[str, Any] | None:
     if ticker in SEC_COMPANY_FACTS_CACHE:
         return SEC_COMPANY_FACTS_CACHE[ticker]
@@ -210,14 +237,17 @@ def extract_sec_fact_series(companyfacts: dict[str, Any] | None, tag_candidates:
     return rows
 
 
-def extract_tax_rows_from_yfinance(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.DataFrame, quality_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    pretax = latest_from_series(get_series(fin, ["Pretax Income", "Income Before Tax", "Earnings Before Tax"]))
-    tax = latest_from_series(get_series(fin, ["Tax Provision", "Income Tax Expense", "Tax Expense"]))
-    cash_taxes = latest_from_series(get_series(cf, ["Cash Taxes Paid", "Income Taxes Paid", "Taxes Paid"]))
-    deferred_tax = latest_from_series(get_series(fin, ["Deferred Tax", "Deferred Income Tax", "Deferred Tax Expense"]))
-    if pretax is None and tax is None:
-        return []
-    return [{"period": datetime.utcnow().date().isoformat(), "pretax_income": pretax, "income_tax_expense": tax, "current_tax_expense": None, "deferred_tax_expense": deferred_tax, "cash_taxes_paid": cash_taxes, "deferred_tax_assets": None, "deferred_tax_liabilities": None, "valuation_allowance": None, "unrecognized_tax_benefits": None, "etr": safe_div(tax, pretax) if safe_gt(pretax, 0) else None, "cash_tax_ratio": safe_div(cash_taxes, tax), "cash_tax_rate": safe_div(cash_taxes, pretax), "deferred_tax_dependency": safe_div(deferred_tax, pretax), "source": "yfinance"}]
+def extract_tax_rows_from_yfinance(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.DataFrame, quality_rows: list[dict[str, Any]], years: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for p in limited_columns(fin, years):
+        pretax = safe_float(fin.at["Pretax Income", p]) if "Pretax Income" in fin.index else safe_float(fin.at["Income Before Tax", p]) if "Income Before Tax" in fin.index else None
+        tax = safe_float(fin.at["Tax Provision", p]) if "Tax Provision" in fin.index else safe_float(fin.at["Income Tax Expense", p]) if "Income Tax Expense" in fin.index else None
+        cash_taxes = safe_float(cf.at["Cash Taxes Paid", p]) if not cf.empty and "Cash Taxes Paid" in cf.index and p in cf.columns else None
+        deferred_tax = safe_float(fin.at["Deferred Tax", p]) if "Deferred Tax" in fin.index else None
+        if pretax is None and tax is None:
+            continue
+        rows.append({"period": str(p.date()), "pretax_income": pretax, "income_tax_expense": tax, "current_tax_expense": None, "deferred_tax_expense": deferred_tax, "cash_taxes_paid": cash_taxes, "deferred_tax_assets": None, "deferred_tax_liabilities": None, "valuation_allowance": None, "unrecognized_tax_benefits": None, "etr": safe_div(tax, pretax) if safe_gt(pretax, 0) else None, "cash_tax_ratio": safe_div(cash_taxes, tax), "cash_tax_rate": safe_div(cash_taxes, pretax), "deferred_tax_dependency": safe_div(deferred_tax, pretax), "source": "yfinance"})
+    return rows
 
 
 def extract_tax_rows_from_sec(ticker: str) -> list[dict[str, Any]]:
@@ -514,14 +544,14 @@ def analyze_tax_quality(tax_rows: list[dict[str, Any]], quality_rows: list[dict[
     return out
 
 
-def build_quarterly_forensic_analysis(ticker: str) -> dict[str, Any]:
+def build_quarterly_forensic_analysis(ticker: str, quarter_limit: int) -> dict[str, Any]:
     out = default_quarterly_analysis()
     try:
         tk = yf.Ticker(ticker)
         qf, qcf, qbs = tk.quarterly_financials, tk.quarterly_cashflow, tk.quarterly_balance_sheet
         if qf.empty and qcf.empty and qbs.empty:
             return out
-        periods = list(qf.columns[:6]) if not qf.empty else []
+        periods = list(qf.columns[:quarter_limit]) if not qf.empty else []
         rows = []
         for p in periods:
             rev = safe_float(qf.at["Total Revenue", p]) if "Total Revenue" in qf.index else None
@@ -548,7 +578,7 @@ def analyze_debt_cashflow_risk(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.DataF
     equity = latest_from_series(get_series(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"]))
     op = latest_from_series(get_series(fin, ["Operating Income", "EBIT"]))
     int_exp = latest_from_series(get_series(fin, ["Interest Expense"]))
-    cfo = latest_from_series(get_series(cf, ["Operating Cash Flow"]))
+    cfo = quality_rows[0].get("cfo") if quality_rows else latest_from_series(get_series(cf, ["Operating Cash Flow"]))
     total_debt = safe_add(ltd, cd)
     if equity is None or int_exp is None:
         out["data_status"] = "Unavailable"
@@ -561,6 +591,42 @@ def analyze_debt_cashflow_risk(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.DataF
         flags.append("Cash flow barely covers interest payments")
     out.update({"risk_level": "High" if flags else "Moderate", "data_status": "Available", "flags": flags, "ratios": ratios, "tenk_checks": ["inspect debt maturity schedule", "check interest rate exposure", "review covenant disclosures", "analyze refinancing risk", "check lease obligations", "inspect off-balance-sheet obligations"]})
     return out
+
+
+def build_core_ratios(quality_rows: list[dict[str, Any]], debt_analysis: dict[str, Any], special: dict[str, Any], period_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    if not quality_rows:
+        return [{"ratio_name": "Coverage", "value": "Unavailable", "status": "Unavailable", "interpretation": "No historical rows", "manual_check": "Confirm available fiscal history"}]
+    r0 = quality_rows[0]
+    prev = quality_rows[1] if len(quality_rows) > 1 else {}
+    ratios = [
+        ("CFO / Net Income", safe_div(r0.get("cfo"), r0.get("net_income")), "Earnings not fully converting into cash", "Review cash flow statement quality"),
+        ("FCF Margin", safe_div(r0.get("fcf"), r0.get("revenue")), "Low free cash conversion", "Check capex sustainability"),
+        ("Revenue Growth", safe_pct_change(r0.get("revenue"), prev.get("revenue")), "Weak topline trend", "Review segment trends"),
+        ("AR / Revenue", safe_div(r0.get("ar"), r0.get("revenue")), "Possible collection or revenue quality issue", "Review allowance and aging"),
+        ("Inventory / Revenue", safe_div(r0.get("inventory"), r0.get("revenue")), "Possible demand weakness or future write-down risk", "Review inventory footnotes"),
+        ("Debt / Equity", (debt_analysis.get("ratios") or {}).get("total_debt_to_equity"), "Debt burden elevated", "Review debt maturity and refinancing risk"),
+        ("Buybacks / CFO", (special.get("metrics") or {}).get("acquisitions_to_cfo"), "Possible financial engineering", "Review share repurchases footnote"),
+        ("Special Items / Net Income", (special.get("metrics") or {}).get("special_items_to_net_income"), "Earnings may include non-core effects", "Review non-GAAP reconciliation"),
+    ]
+    out = []
+    for name, val, interp, check in ratios:
+        status = "Unavailable" if val is None else "Risk" if safe_gt(val, 1.2) or (name == "CFO / Net Income" and safe_lt(val, 1)) else "Watch" if safe_gt(val, 0.8) else "Healthy"
+        out.append({"ratio_name": name, "value": val, "status": status, "interpretation": interp if status in ("Risk", "Watch") else "Within acceptable range", "manual_check": check})
+    # fill requested list footprint
+    requested = ["Accrual Ratio", "Gross Margin", "Net Margin", "DSO", "DIO", "ETR", "Cash Tax Rate", "Net Debt / CFO", "Interest Coverage", "Cash Interest Coverage", "Dividends / Net Income", "Total Payout / FCF", "SBC / Revenue", "SBC / CFO", "Goodwill / Assets", "Intangibles / Assets", "Other Income / Net Income", "Buybacks / FCF"]
+    for x in requested:
+        out.append({"ratio_name": x, "value": None, "status": "Unavailable", "interpretation": "Needs additional data coverage", "manual_check": "Verify in 10-K/10-Q footnotes"})
+    return out[:25]
+
+
+def build_attention_points(all_modules: dict[str, Any]) -> list[dict[str, Any]]:
+    points = []
+    for r in all_modules.get("core_ratios", []):
+        if r.get("status") in ("Risk", "Watch"):
+            points.append({"area": "Core Ratios", "severity": r.get("status"), "issue": r.get("ratio_name"), "ratio_evidence": safe_fmt_num(r.get("value")), "why_it_matters": r.get("interpretation"), "where_to_check": r.get("manual_check"), "source": "yfinance / SEC facts"})
+    if all_modules.get("coverage_status") == "Partial historical coverage":
+        points.append({"area": "Coverage", "severity": "Watch", "issue": "Partial historical coverage", "ratio_evidence": all_modules.get("analysis_window_label"), "why_it_matters": "Trend interpretation may be incomplete", "where_to_check": "Prior 10-Ks and 10-Qs", "source": "yfinance"})
+    return points[:10]
 
 
 def calculate_data_completeness(payload: dict[str, Any]) -> dict[str, Any]:
@@ -628,19 +694,23 @@ def home() -> str:
     </div>
     <div class="grid" id="topCards"></div>
     <div class="grid" style="margin-top:12px">
-      <section class="card span-6"><div class="k">Tax Analysis</div><div id="tax"></div></section>
-      <section class="card span-6"><div class="k">Debt Analysis</div><div id="debt"></div></section>
-      <section class="card span-12"><div class="k">Quarterly Analysis</div><div id="quarterly"></div></section>
+      <section class="card span-12"><div class="k">Analysis Window</div><div id="analysiswindow"></div></section>
+      <section class="card span-6"><div class="k">Tax / Book vs Tax</div><div id="tax"></div></section>
+      <section class="card span-6"><div class="k">Debt & Interest Coverage</div><div id="debt"></div></section>
+      <section class="card span-12"><div class="k">Quarterly Forensic Breakdown</div><div id="quarterly"></div></section>
+      <section class="card span-12"><div class="k">Top Attention Points</div><div id="attention"></div></section>
+      <section class="card span-12"><div class="k">Core Ratios & Attention Points</div><div id="coreratios"></div></section>
       <section class="card span-8"><div class="k">Investment View</div><div id="invest"></div></section>
       <section class="card span-4"><div class="k">Data Completeness</div><div id="complete"></div></section>
       <section class="card span-12"><div class="k">SEC Filing Intelligence</div><div id="filingintel"></div></section>
-      <section class="card span-12"><div class="k">Acquisitions, Nonrecurring & Accounting Changes</div><div id="specialitems"></div></section>
+      <section class="card span-12"><div class="k">Special Items / Accounting Changes</div><div id="specialitems"></div></section>
+      <section class="card span-12"><div class="k">Capital Allocation & Buybacks</div><div id="capital"></div></section>
       <section class="card span-12"><div class="k">Screener</div><div id="screener" class="loading">Loading screener...</div></section>
     </div>
   </div>
 <script>
 const $ = (id)=>document.getElementById(id);
-const riskCls=(r='')=>/high/i.test(r)?'r-high':/mod|partial|watch/i.test(r)?'r-mod':/low|complete|stable|buy/i.test(r)?'r-low':'r-unk';
+const riskCls=(r='')=>/high|risk/i.test(r)?'r-high':/mod|partial|watch/i.test(r)?'r-mod':/low|healthy|complete|stable|buy/i.test(r)?'r-low':'r-unk';
 const pill=(r)=>`<span class="risk ${riskCls(r)}">${r||'Unknown'}</span>`;
 const n=(v)=>v==null?'—':(typeof v==='number'?v.toLocaleString(undefined,{maximumFractionDigits:2}):v);
 const reasonList=(arr)=>!arr||!arr.length?'<div class="muted">None</div>':`<ul>${arr.map(x=>`<li>${x}</li>`).join('')}</ul>`;
@@ -670,13 +740,15 @@ async function analyze(){
   const t= $('ticker').value.trim().toUpperCase() || 'TSLA';
   $('analyzeBtn').disabled=true;
   try{
-    const r=await fetch(`/api/analyze?ticker=${encodeURIComponent(t)}&period=5y`); const d=await r.json(); render(d);
+    const period = new URLSearchParams(window.location.search).get('period') || '5y';
+    const r=await fetch(`/api/analyze?ticker=${encodeURIComponent(t)}&period=${encodeURIComponent(period)}`); const d=await r.json(); render(d);
   }catch(e){ alert('Analyze failed: '+e.message); }
   finally{ $('analyzeBtn').disabled=false; }
 }
 
 function render(d){
   const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{}, sp=d.special_items_analysis||{};
+  $('analysiswindow').innerHTML = `<div class='v'>${d.analysis_window_label||'Analysis window unavailable'}</div><div>${pill(d.coverage_status||'Unknown')}</div>`;
   const brief = buildAnalystBrief(d, inv, fs, filing);
   $('topCards').innerHTML = `
     <div class="card span-3"><div class="k">Ticker</div><div class="v mono">${d.ticker||'—'}</div></div>
@@ -699,6 +771,8 @@ function render(d){
     <table><tr><th>Period</th><th>Revenue</th><th>Net Income</th><th>CFO</th><th>FCF</th><th>CFO/NI</th></tr>
     ${(q.rows||[]).map(r=>`<tr><td>${r.period||'—'}</td><td>${n(r.revenue)}</td><td>${n(r.net_income)}</td><td>${n(r.cfo)}</td><td>${n(r.fcf)}</td><td>${n(r.cfo_ni)}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">No quarterly rows</td></tr>'}</table>
     <div class="k" style="margin-top:10px">Reason Codes</div>${reasonList(q.reason_codes)}`;
+  $('attention').innerHTML = reasonList((d.top_attention_points||[]).map(x=>`${x.severity}: ${x.issue} — ${x.why_it_matters}`));
+  $('coreratios').innerHTML = `<div style='margin-bottom:8px'>Filter: All / Risk / Watch / Unavailable</div><table><tr><th>Ratio</th><th>Value</th><th>Status</th><th>Interpretation</th><th>Manual check</th></tr>${(d.core_ratios||[]).map(r=>`<tr><td>${r.ratio_name}</td><td>${n(r.value)}</td><td>${pill(r.status)}</td><td>${r.interpretation}</td><td>${r.manual_check}</td></tr>`).join('')}</table>`;
 
   $('invest').innerHTML = `<div class="v">${inv.forensic_view||'INCONCLUSIVE'}</div><div class="muted">Confidence: ${inv.confidence||'Low'}</div>
   <div class="k" style="margin-top:10px">What matters now</div>${reasonList(brief.whatMatters)}
@@ -714,6 +788,8 @@ function render(d){
   const link=(u)=>u?`<a href="${u}" target="_blank">Open SEC filing</a>`:'—';
   const unavailableMsg=(!diag.filing_text_downloaded)?'<div class="muted">SEC filing unavailable - check CIK mapping or SEC request</div>':'';
   $('specialitems').innerHTML = `<div>${pill(sp.risk_level)} Score: ${n(sp.score)}</div><table><tr><th>Metric</th><th>Value</th></tr>${Object.entries(sp.metrics||{}).map(([k,v])=>`<tr><td>${k}</td><td>${n(v)}</td></tr>`).join('')}</table><div class='k' style='margin-top:10px'>Top Findings</div>${reasonList((sp.flags||[]).slice(0,5))}<div class='k' style='margin-top:10px'>Special Item Flags</div>${reasonList(sp.suspicious_signals)}<div class='k' style='margin-top:10px'>Accounting Change Flags</div>${reasonList((sp.flags||[]).filter(x=>/accounting|restatement|material weakness/i.test(x)))}<div class='k' style='margin-top:10px'>Acquisition Flags</div>${reasonList((sp.flags||[]).filter(x=>/acquisition|goodwill|organic/i.test(x)))}<div class='k' style='margin-top:10px'>Short Excerpts</div>${reasonList((sp.excerpt_windows||[]).slice(0,3))}<details><summary>Raw excerpts</summary>${reasonList(sp.excerpt_windows)}</details>`;
+  const cap = d.capital_allocation_analysis||{};
+  $('capital').innerHTML = `<div>${pill(cap.risk_level||'Unknown')}</div><div class='k' style='margin-top:10px'>Flags</div>${reasonList(cap.flags)}<table><tr><th>Metric</th><th>Value</th></tr>${Object.entries(cap.metrics||{}).map(([k,v])=>`<tr><td>${k}</td><td>${n(v)}</td></tr>`).join('')}</table>`;
 
   $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>${unavailableMsg}
   <table><tr><th>Form</th><th>Date</th><th>Link</th></tr><tr><td>10-K</td><td>${k.filing_date||'—'}</td><td>${link(k.filing_url)}</td></tr><tr><td>10-Q</td><td>${qf.filing_date||'—'}</td><td>${link(qf.filing_url)}</td></tr></table>
@@ -750,6 +826,7 @@ analyze(); loadScreener();
 @app.route("/api/analyze")
 def api_analyze():
     ticker = request.args.get("ticker", "MRK").upper().strip()
+    period_cfg = get_period_config(request.args.get("period", "5y"))
     tax_analysis = default_tax_analysis()
     quarterly_analysis = default_quarterly_analysis()
     inventory_analysis = default_inventory_analysis()
@@ -758,13 +835,14 @@ def api_analyze():
     macro_analysis = default_macro_analysis()
     investment_view = default_investment_view()
     special_items_analysis = default_special_items_analysis()
+    capital_allocation_analysis = {"risk_level": "Unknown", "flags": ["Unavailable"], "metrics": {}}
     try:
         tk = yf.Ticker(ticker)
         fin, cf, bs = tk.financials, tk.cashflow, tk.balance_sheet
-        quality_rows: list[dict[str, Any]] = []
-        tax_rows = extract_tax_rows_from_yfinance(fin, cf, bs, quality_rows) or extract_tax_rows_from_sec(ticker)
+        quality_rows: list[dict[str, Any]] = build_quality_rows(fin, cf, bs, period_cfg["years"])
+        tax_rows = extract_tax_rows_from_yfinance(fin, cf, bs, quality_rows, period_cfg["years"]) or extract_tax_rows_from_sec(ticker)
         tax_analysis = analyze_tax_quality(tax_rows, quality_rows)
-        quarterly_analysis = build_quarterly_forensic_analysis(ticker)
+        quarterly_analysis = build_quarterly_forensic_analysis(ticker, period_cfg["quarters"])
         debt_analysis = analyze_debt_cashflow_risk(fin, cf, bs, quality_rows)
         data_probe = {
             "revenue": latest_from_series(get_series(fin, ["Total Revenue"])), "net_income": latest_from_series(get_series(fin, ["Net Income"])),
@@ -788,6 +866,15 @@ def api_analyze():
         debt_text = analyze_debt_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         rev_text = analyze_revenue_and_nonrecurring_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         special_items_analysis = analyze_special_items_and_acquisitions(fin, cf, bs, filing_text, quality_rows)
+        divs = latest_from_series(get_series(cf, ["Cash Dividends Paid"]))
+        buybacks = latest_from_series(get_series(cf, ["Repurchase Of Capital Stock", "Common Stock Repurchased"]))
+        cfo_latest = quality_rows[0].get("cfo") if quality_rows else latest_from_series(get_series(cf, ["Operating Cash Flow"]))
+        fcf_latest = quality_rows[0].get("fcf") if quality_rows else None
+        cap_metrics = {"dividends_paid": divs, "buybacks": buybacks, "dividends_net_income": safe_div(safe_abs(divs), quality_rows[0].get("net_income") if quality_rows else None), "buybacks_cfo": safe_div(safe_abs(buybacks), cfo_latest), "buybacks_fcf": safe_div(safe_abs(buybacks), fcf_latest), "total_payout_fcf": safe_div(safe_add(safe_abs(divs), safe_abs(buybacks)), fcf_latest), "capex_cfo": safe_div(safe_abs(quality_rows[0].get("capex") if quality_rows else None), cfo_latest)}
+        cap_flags = []
+        if safe_gt(cap_metrics["buybacks_cfo"], 1): cap_flags.append("Buybacks exceed CFO")
+        if safe_gt(cap_metrics["total_payout_fcf"], 1): cap_flags.append("Total payout exceeds FCF")
+        capital_allocation_analysis = {"risk_level": "High" if cap_flags else "Watch" if any(v is not None for v in cap_metrics.values()) else "Unknown", "flags": cap_flags or ["No major payout stress detected in limited data"], "metrics": cap_metrics}
         filing_text_summary = build_filing_text_forensic_score({"tax":tax_text,"receivables":recv_text,"inventory":inv_text,"debt":debt_text,"revenue_nonrecurring":rev_text,"sources":filing_sources})
         if not filing_text:
             filing_text_summary = {"filing_text_score": None, "filing_text_risk_level": "Unknown", "top_text_red_flags": ["SEC filing text unavailable"], "most_relevant_excerpts": [], "filing_sources": filing_sources}
@@ -799,12 +886,16 @@ def api_analyze():
         debt_analysis["text_signals"] = debt_text
         macro_analysis = build_macro_regime_context()
         investment_view = build_investment_view(locals(), completeness)
+        core_ratios = build_core_ratios(quality_rows, debt_analysis, special_items_analysis, period_cfg)
+        analysis_window_label = f"Analysis window: Latest {period_cfg['years']} fiscal years + latest available quarters"
+        coverage_status = "Partial historical coverage" if len(quality_rows) < period_cfg["years"] or len(quarterly_analysis.get("rows", [])) < period_cfg["quarters"] else "Full coverage"
+        top_attention_points = build_attention_points({"core_ratios": core_ratios, "coverage_status": coverage_status, "analysis_window_label": analysis_window_label})
         if filing_text_summary.get("filing_text_risk_level") == "High" and completeness.get("level") == "Weak":
             investment_view["forensic_view"] = "INCONCLUSIVE"
         filing_diagnostics = {"cik_found": bool(filing_10k.get("cik") or filing_10q.get("cik")), "submissions_loaded": bool((filing_10k.get("cik") or filing_10q.get("cik")) and (get_sec_submissions((filing_10k.get("cik") or filing_10q.get("cik"))) is not None)), "latest_10k_found": bool(filing_10k.get("available")), "latest_10q_found": bool(filing_10q.get("available")), "filing_text_downloaded": bool(filing_text), "error": None}
         out = {"ticker": ticker, "tax_analysis": tax_analysis, "quarterly_analysis": quarterly_analysis, "inventory_analysis": inventory_analysis,
                "receivables_analysis": receivables_analysis, "debt_analysis": debt_analysis, "macro_analysis": macro_analysis,
-               "investment_view": investment_view, "special_items_analysis": special_items_analysis, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "special_items": analyze_special_items_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"short_findings":[],"excerpt_windows":[],"manual_review_priority":"High"}, "summary": filing_text_summary}}
+               "investment_view": investment_view, "special_items_analysis": special_items_analysis, "capital_allocation_analysis": capital_allocation_analysis, "core_ratios": core_ratios, "top_attention_points": top_attention_points, "analysis_window_label": analysis_window_label, "coverage_status": coverage_status, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "special_items": analyze_special_items_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"short_findings":[],"excerpt_windows":[],"manual_review_priority":"High"}, "summary": filing_text_summary}}
         return jsonify(out)
     except Exception as e:
         print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
