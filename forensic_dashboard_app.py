@@ -205,6 +205,23 @@ def get_period_config(period: str) -> dict[str, Any]:
     return {"period": normalized if normalized in mapping else "5y", "years": years, "quarters": quarters}
 
 
+def parse_period_param(period: str) -> dict[str, int | str]:
+    cfg = get_period_config(period)
+    return {"selected_period": cfg["period"], "annual_years": cfg["years"], "quarterly_periods": cfg["quarters"]}
+
+
+def make_metric(value: Any, source: str, field_name: str, period: str | None = None, missing_reason: str | None = None) -> dict[str, Any]:
+    available = safe_float(value) is not None
+    return {
+        "value": safe_float(value),
+        "source": source if available else "Unavailable",
+        "field_name": field_name,
+        "period": period,
+        "available": available,
+        "missing_reason": None if available else (missing_reason or f"{field_name} missing"),
+    }
+
+
 def limited_columns(df: pd.DataFrame | None, count: int) -> list[Any]:
     if df is None or df.empty:
         return []
@@ -654,6 +671,18 @@ def build_attention_points(all_modules: dict[str, Any]) -> list[dict[str, Any]]:
     return points[:10]
 
 
+def build_top_attention_points(ratio_matrix: list[dict[str, Any]], modules: dict[str, Any], sec_findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for r in ratio_matrix:
+        if r.get("status") in ("Risk", "Watch"):
+            points.append({"severity": "High" if r.get("status") == "Risk" else "Medium", "area": r.get("category", "Ratios"), "point": f"{r.get('name')} flagged as {r.get('status')}", "evidence": f"{r.get('name')} = {safe_fmt_num(r.get('value'))}", "source": r.get("source", "Unavailable"), "where_to_check": r.get("manual_check", "10-K/10-Q")})
+    for f in sec_findings[:4]:
+        points.append({"severity": f.get("severity", "Medium"), "area": f.get("area", "SEC Filing"), "point": f.get("finding", "SEC text signal"), "evidence": f.get("evidence_short") or f.get("ratio_or_number", "See filing"), "source": "SEC Filing Text", "where_to_check": f.get("where_to_verify", "Latest filing footnotes")})
+    if modules.get("data_completeness", {}).get("level") == "Weak":
+        points.append({"severity": "Medium", "area": "Coverage", "point": "Structured data completeness is weak", "evidence": f"Score {modules.get('data_completeness', {}).get('score')}", "source": "Unavailable", "where_to_check": "Company Facts + yfinance fields"})
+    return points[:10]
+
+
 def calculate_data_completeness(payload: dict[str, Any]) -> dict[str, Any]:
     fields = ["revenue", "net_income", "cfo", "ar", "inventory", "cogs", "pretax_income", "tax_expense", "cash_taxes", "deferred_tax", "quarterly_data", "debt", "interest_expense"]
     missing = [f for f in fields if payload.get(f) is None]
@@ -716,27 +745,22 @@ def build_cash_flow_ratio_matrix(fin: pd.DataFrame, cf: pd.DataFrame, bs: pd.Dat
     interest = latest_from_series(get_series(fin, ["Interest Expense"]))
     buybacks = latest_from_series(get_series(cf, ["Repurchase Of Capital Stock", "Common Stock Repurchased"]))
     dividends = latest_from_series(get_series(cf, ["Cash Dividends Paid", "Common Stock Dividend Paid"]))
+    tax_row = (tax_analysis.get("rows") or [{}])[0]
     ratios = [
-        ("CFO / Net Income", m.get("cfo_to_net_income"), "Compare earnings conversion", "Cash flow statement"),
-        ("CFO / Revenue", m.get("cfo_margin"), "Operating cash productivity", "CFO vs revenue trend"),
-        ("FCF / Revenue", m.get("fcf_margin"), "Free cash yield from sales", "CapEx and CFO notes"),
-        ("FCF / Net Income", m.get("fcf_conversion"), "Conversion of accounting earnings", "CFO and CapEx bridge"),
-        ("Accruals / Net Income", m.get("accrual_ratio"), "High accruals may reduce quality", "Accrual and non-cash items"),
-        ("CapEx / CFO", safe_div(safe_abs(m.get("capex")), m.get("cfo")), "Reinvestment intensity", "Capital expenditure policy"),
-        ("Debt / CFO", safe_div(debt, m.get("cfo")), "Debt service pressure", "Debt maturity table"),
-        ("Interest Expense / CFO", safe_div(interest, m.get("cfo")), "Interest burden vs cash flow", "Interest and financing cost"),
-        ("Cash Interest Coverage", safe_div(m.get("cfo"), interest), "Cash coverage of interest", "Interest coverage disclosure"),
-        ("Buybacks / CFO", safe_div(safe_abs(buybacks), m.get("cfo")), "Capital return affordability", "Equity transactions"),
-        ("Dividends / CFO", safe_div(safe_abs(dividends), m.get("cfo")), "Dividend cash burden", "Dividend footnote"),
-        ("Total Payout / FCF", safe_div(safe_add(safe_abs(buybacks), safe_abs(dividends)), m.get("fcf")), "Total payout sustainability", "Capital allocation policy"),
-        ("Cash Taxes / Tax Expense", safe_div((tax_analysis.get("rows") or [{}])[0].get("cash_taxes_paid"), (tax_analysis.get("rows") or [{}])[0].get("income_tax_expense")), "Cash taxes realism", "Tax footnote"),
+        ("Cash Flow", "CFO / Net Income", m.get("cfo_to_net_income"), ">=1.0", "Only {:.2f}x of reported earnings converted into operating cash flow.", "CFO or Net Income missing from yfinance financial statements", "Derived: yfinance"),
+        ("Cash Flow", "FCF Margin", m.get("fcf_margin"), ">5%", "{:.2%} of revenue converted to free cash flow after CapEx.", "CFO, CapEx, or Revenue missing from yfinance financial statements", "Derived: yfinance"),
+        ("Cash Flow", "Accrual Ratio", m.get("accrual_ratio"), "<=25%", "Accrual ratio at {:.2%}; higher accrual dependence can reduce earnings quality.", "Net Income or CFO missing from yfinance financial statements", "Derived: yfinance"),
+        ("Debt", "Debt / CFO", safe_div(debt, m.get("cfo")), "<4.0x", "Total debt equals {:.2f}x operating cash flow, indicating debt service sensitivity.", "Debt or CFO missing from yfinance statements", "Derived: yfinance"),
+        ("Debt", "Cash Interest Coverage", safe_div(m.get("cfo"), interest), ">2.0x", "Operating cash flow covers interest {:.2f}x.", "Interest expense or CFO missing from yfinance statements", "Derived: yfinance"),
+        ("Capital Allocation", "Buybacks / CFO", safe_div(safe_abs(buybacks), m.get("cfo")), "<=50%", "Buybacks consumed {:.2%} of operating cash flow.", "Buyback line item or CFO missing from yfinance cash flow", "Derived: yfinance"),
+        ("Capital Allocation", "Dividends / CFO", safe_div(safe_abs(dividends), m.get("cfo")), "<=60%", "Dividends consumed {:.2%} of operating cash flow.", "Dividend line item or CFO missing from yfinance cash flow", "Derived: yfinance"),
+        ("Tax", "Cash Tax Ratio", safe_div(tax_row.get("cash_taxes_paid"), tax_row.get("income_tax_expense")), "80%-120%", "Cash taxes are {:.2%} of book tax expense.", "Cash taxes paid or tax expense missing from yfinance/SEC facts", "Derived: yfinance + SEC"),
     ]
     out = []
-    for name, value, interp, check in ratios:
-        status = "Unavailable" if value is None else ("Risk" if (value < 0.5 or value > 1.2) and "Coverage" not in name else "Watch")
-        if value is not None and name in ["CFO / Net Income", "Cash Interest Coverage"] and value >= 1:
-            status = "Healthy"
-        out.append({"ratio_name": name, "value": value, "status": status, "interpretation": interp, "manual_check": check})
+    for category, name, value, threshold, interp_tpl, missing_reason, source in ratios:
+        status = "Unavailable" if value is None else ("Risk" if name in ("CFO / Net Income", "Cash Interest Coverage") and value < 1 else "Watch" if name == "Debt / CFO" and value > 4 else "Healthy")
+        interp = (interp_tpl.format(value) if value is not None else f"Unavailable because {missing_reason}.")
+        out.append({"category": category, "name": name, "value": value, "formatted_value": safe_fmt_pct(value) if "Margin" in name or "Ratio" in name or "/ CFO" in name and value is not None and value < 2 else safe_fmt_num(value), "status": status, "threshold": threshold, "specific_interpretation": interp, "manual_check": "Cash flow statement / 10-K footnotes", "source": source if value is not None else "Unavailable", "period": "Latest fiscal year", "missing_reason": None if value is not None else missing_reason})
     return out
 
 
@@ -811,9 +835,9 @@ def home() -> str:
   <div class="wrap">
     <div class="head">
       <div><h1>Forensic Command Center</h1><div class="muted">Analyst-first forensic dashboard: what matters, why it matters, where to verify it, and how it changes the forensic view.</div></div>
-      <div class="ctl"><input id="ticker" value="TSLA" aria-label="Ticker" /><button id="analyzeBtn">Analyze</button><button id="reloadScreener">Reload Screener</button></div>
+      <div class="ctl"><input id="ticker" value="TSLA" aria-label="Ticker" /><select id="periodSel"><option value="1y">1Y</option><option value="3y">3Y</option><option value="5y" selected>5Y</option></select><button id="analyzeBtn">Analyze</button><button id="reloadScreener">Reload Screener</button></div>
     </div>
-    <div class="grid" id="topCards"></div>
+    <div class="grid" id="topCards"></div><div class="grid" style="margin-top:10px"><section class="card span-12"><div class="k">Analysis Window</div><div id="analysiswindow"></div></section></div>
     <div class="grid" style="margin-top:12px">
       <section class="card span-8"><div class="k">Executive Forensic Verdict</div><div id="invest"></div></section>
       <section class="card span-4"><div class="k">Top Attention Points</div><div id="complete"></div></section>
@@ -870,15 +894,15 @@ async function analyze(){
   const t= $('ticker').value.trim().toUpperCase() || 'TSLA';
   $('analyzeBtn').disabled=true;
   try{
-    const period = new URLSearchParams(window.location.search).get('period') || '5y';
+    const period = document.getElementById('periodSel')?.value || (new URLSearchParams(window.location.search).get('period') || '5y');
     const r=await fetch(`/api/analyze?ticker=${encodeURIComponent(t)}&period=${encodeURIComponent(period)}`); const d=await r.json(); render(d);
   }catch(e){ alert('Analyze failed: '+e.message); }
   finally{ $('analyzeBtn').disabled=false; }
 }
 
 function render(d){
-  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{}, sp=d.special_items_analysis||{}, cfa=d.cash_flow_analysis||{}, cfm=d.cash_flow_ratio_matrix||[], cmi=d.cross_module_insights||[];
-  const brief = buildAnalystBrief(d, inv, fs, filing);
+  const tax=d.tax_analysis||{}, q=d.quarterly_analysis||{}, debt=d.debt_analysis||{}, inv=d.investment_view||{}, comp=d.data_completeness||{}, filing=d.sec_filing_intelligence||{}, fs=filing.summary||{}, sp=d.special_items_analysis||{}, cfa=d.cash_flow_analysis||{}, cfm=d.cash_flow_ratio_matrix||[], cmi=d.cross_module_insights||[], aw=d.analysis_window||{};
+  const brief = buildAnalystBrief(d, inv, fs, filing);$('analysiswindow').innerHTML=`<table><tr><th>Selected Period</th><th>Annual Coverage</th><th>Quarterly Coverage</th><th>Status</th></tr><tr><td>${aw.selected_period||'5y'}</td><td>${aw.annual_periods_available||0}/${aw.annual_years_requested||0}</td><td>${aw.quarterly_periods_available||0}/${aw.quarterly_periods_requested||0}</td><td>${pill(aw.coverage_status||'Unknown')}</td></tr></table><div class='muted'>${aw.coverage_note||''}</div>`;
   $('topCards').innerHTML = `
     <div class="card span-3"><div class="k">Ticker</div><div class="v mono">${d.ticker||'—'}</div></div>
     <div class="card span-3"><div class="k">Tax Risk</div><div class="v">${pill(tax.tax_risk_level)}</div></div>
@@ -910,14 +934,14 @@ function render(d){
   <details><summary>Full risk and support detail</summary><div class="k" style="margin-top:10px">Risks</div>${reasonList(inv.risks)}<div class="k" style="margin-top:10px">Supporting Reasons</div>${reasonList(inv.supporting_reasons)}
   <div class="k" style="margin-top:10px">What Would Change View</div>${reasonList(inv.what_would_change_view)}</details>`;
 
-  $('complete').innerHTML = `<div>${pill(comp.level)}</div><div class="k" style="margin-top:10px">Top Attention</div>${reasonList((inv.risks||[]).slice(0,5))}`;
+  $('complete').innerHTML = `<div>${pill(comp.level)}</div><div class="k" style="margin-top:10px">Top Attention</div>${reasonList((d.top_attention_points||[]).map(x=>x.point))}`;
   const m=cfa.metrics||{};
   $('cashflow').innerHTML=`<div>${pill(cfa.risk_level)} Score: ${n(cfa.score)} <span class="muted">(${cfa.data_status||'Unavailable'})</span></div>
   <table><tr><th>CFO</th><th>Net Income</th><th>CFO/NI</th><th>FCF</th><th>FCF Margin</th><th>Accrual Ratio</th></tr>
   <tr><td>${n(m.cfo)}</td><td>${n(m.net_income)}</td><td>${n(m.cfo_to_net_income)}</td><td>${n(m.fcf)}</td><td>${n(m.fcf_margin)}</td><td>${n(m.accrual_ratio)}</td></tr></table>
   <div class="k" style="margin-top:10px">Flags</div>${reasonList(cfa.flags)}<div class="k" style="margin-top:10px">Normal signals</div>${reasonList(cfa.normal_signals)}<div class="k" style="margin-top:10px">Suspicious signals</div>${reasonList(cfa.suspicious_signals)}<div class="k" style="margin-top:10px">10-K Review Checklist</div>${reasonList(cfa.tenk_checks)}
   ${(cfa.rows||[]).length?`<div class="k" style="margin-top:10px">Trend Rows</div><table><tr><th>Period</th><th>CFO</th><th>Net Income</th><th>FCF</th><th>Accruals</th></tr>${(cfa.rows||[]).map(r=>`<tr><td>${r.period||'—'}</td><td>${n(r.cfo)}</td><td>${n(r.net_income)}</td><td>${n(r.fcf)}</td><td>${n(r.accruals)}</td></tr>`).join('')}</table>`:'<div class="muted">Cash flow trend unavailable from structured data.</div>'}`;
-  $('cfmatrix').innerHTML=`<table><tr><th>Ratio</th><th>Value</th><th>Status</th><th>Interpretation</th><th>Manual check</th></tr>${(cfm||[]).map(r=>`<tr><td>${r.ratio_name}</td><td>${n(r.value)}</td><td>${pill(r.status)}</td><td>${r.interpretation}</td><td>${r.manual_check}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No ratio matrix available</td></tr>'}</table>`;
+  $('cfmatrix').innerHTML=`<table><tr><th>Category</th><th>Ratio</th><th>Value</th><th>Status</th><th>Threshold</th><th>Interpretation</th><th>Source</th></tr>${(cfm||[]).map(r=>`<tr><td>${r.category||'—'}</td><td>${r.name||r.ratio_name}</td><td>${r.formatted_value||n(r.value)}</td><td>${pill(r.status)}</td><td>${r.threshold||'—'}</td><td>${r.specific_interpretation||r.interpretation}</td><td>${r.source||'Unavailable'}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">No ratio matrix available</td></tr>'}</table>`;
   $('crossmod').innerHTML=reasonList(cmi);
 
   const k=filing.latest_10k||{}, qf=filing.latest_10q||{};
@@ -929,7 +953,7 @@ function render(d){
   $('capital').innerHTML = `<div>${pill(cap.risk_level||'Unknown')}</div><div class='k' style='margin-top:10px'>Flags</div>${reasonList(cap.flags)}<table><tr><th>Metric</th><th>Value</th></tr>${Object.entries(cap.metrics||{}).map(([k,v])=>`<tr><td>${k}</td><td>${n(v)}</td></tr>`).join('')}</table>`;
 
   const analystFindings = filing.analyst_findings || [];
-  $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>${unavailableMsg}
+  $('filingintel').innerHTML=`<div>${pill((filing.summary_cards||{}).filing_text_risk||fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>${unavailableMsg}
   <table><tr><th>Form</th><th>Date</th><th>Link</th></tr><tr><td>10-K</td><td>${k.filing_date||'—'}</td><td>${link(k.filing_url)}</td></tr><tr><td>10-Q</td><td>${qf.filing_date||'—'}</td><td>${link(qf.filing_url)}</td></tr></table>
   <div class="k" style="margin-top:10px">Top 5 Analyst Findings</div>${renderAnalystFindings(analystFindings)}
   <div class="k" style="margin-top:10px">Top 5 Manual Review Priorities</div>${reasonList((analystFindings||[]).map(x=>x.manual_check).slice(0,5))}`;
@@ -943,8 +967,7 @@ async function loadScreener(){
   try{
     const r=await fetch('/api/screener'); const d=await r.json();
     const rows=d.rows||[];
-    el.innerHTML = `<table><tr><th>Ticker</th><th>Tax Risk</th><th>Quarterly Risk</th><th>Debt Risk</th><th>Cash Flow Risk</th><th>CFO / NI</th><th>FCF Margin</th><th>Accrual Ratio</th><th>Cross-Module Main Insight</th><th>Forensic View</th></tr>
-      ${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Quarterly Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${pill(x['Cash Flow Risk'])}</td><td>${n(x['CFO / NI'])}</td><td>${n(x['FCF Margin'])}</td><td>${n(x['Accrual Ratio'])}</td><td>${x['Cross-Module Main Insight']||'—'}</td><td>${x['Forensic View']||'—'}</td></tr>`).join('')}</table>`;
+    el.innerHTML = `<table><tr><th>Ticker</th><th>Window</th><th>Score</th><th>Cash Flow</th><th>Tax</th><th>Debt</th><th>Special</th><th>SEC Text</th><th>Completeness</th><th>Top Attention</th><th>Main Source</th></tr>${rows.map(x=>`<tr><td class="mono">${x.Ticker}</td><td>${x['Analysis Window']}</td><td>${n(x['Overall Forensic Score'])}</td><td>${pill(x['Cash Flow Risk'])}</td><td>${pill(x['Tax Risk'])}</td><td>${pill(x['Debt Risk'])}</td><td>${pill(x['Special Items Risk'])}</td><td>${pill(x['SEC Text Risk'])}</td><td>${pill(x['Data Completeness'])}</td><td>${x['Top Attention Point']||'—'}</td><td>${x['Main Source']||'—'}</td></tr>`).join('')}</table>`;
   }catch(e){ el.textContent='Screener failed: '+e.message; }
   finally{ el.classList.remove('loading'); }
 }
@@ -959,7 +982,8 @@ analyze(); loadScreener();
 @app.route("/api/analyze")
 def api_analyze():
     ticker = request.args.get("ticker", "MRK").upper().strip()
-    period_cfg = get_period_config(request.args.get("period", "5y"))
+    period_input = request.args.get("period", "5y")
+    period_cfg = get_period_config(period_input)
     tax_analysis = default_tax_analysis()
     quarterly_analysis = default_quarterly_analysis()
     inventory_analysis = default_inventory_analysis()
@@ -1030,10 +1054,26 @@ def api_analyze():
         analyst_findings = []
         for area, flags in [("Tax", tax_text.get("tax_text_flags", [])), ("Receivables", recv_text.get("flags", [])), ("Inventory", inv_text.get("flags", [])), ("Debt", debt_text.get("flags", [])), ("Revenue", rev_text.get("flags", []))]:
             for flag in flags[:2]:
-                analyst_findings.append({"area": area, "severity": "High" if "unavailable" not in flag.lower() else "Low", "finding": flag, "why_it_matters": "Potential earnings quality and cash conversion impact.", "evidence": flag, "manual_check": "Review related 10-K/10-Q footnote and rollforward tables."})
+                analyst_findings.append({"area": area, "severity": "High" if "unavailable" not in flag.lower() else "Low", "finding": flag, "ratio_or_number": "See ratio matrix", "why_it_matters": "Potential earnings quality and cash conversion impact.", "where_to_verify": "Related 10-K/10-Q footnote and rollforward tables", "source": "SEC Filing Text", "evidence_short": truncate_text(flag, 220) if 'truncate_text' in globals() else str(flag)[:220]})
+        analysis_window = {
+            "selected_period": period_cfg["period"],
+            "annual_years_requested": period_cfg["years"],
+            "quarterly_periods_requested": period_cfg["quarters"],
+            "annual_periods_available": len(quality_rows),
+            "quarterly_periods_available": len(quarterly_analysis.get("rows", [])),
+            "coverage_status": "Complete" if len(quality_rows) >= period_cfg["years"] else "Partial" if quality_rows else "Weak",
+            "coverage_note": f"Latest {period_cfg['years']} fiscal years + latest available quarters",
+        }
+        metric_sources = {
+            "revenue": make_metric(data_probe["revenue"], "yfinance", "Total Revenue", "Latest FY", "Total Revenue missing from yfinance financials"),
+            "net_income": make_metric(data_probe["net_income"], "yfinance", "Net Income", "Latest FY", "Net Income missing from yfinance financials"),
+            "cfo": make_metric(data_probe["cfo"], "yfinance", "Operating Cash Flow", "Latest FY", "Operating Cash Flow missing from yfinance cash flow"),
+            "etr": make_metric((tax_analysis.get("rows") or [{}])[0].get("etr"), tax_analysis.get("source", "Unavailable"), "Effective Tax Rate", "Latest FY", "Pretax income or tax expense missing from yfinance/SEC Company Facts"),
+        }
+        top_attention = build_top_attention_points(cash_flow_ratio_matrix, {"data_completeness": completeness}, analyst_findings)
         out = {"ticker": ticker, "tax_analysis": tax_analysis, "quarterly_analysis": quarterly_analysis, "inventory_analysis": inventory_analysis,
                "receivables_analysis": receivables_analysis, "debt_analysis": debt_analysis, "macro_analysis": macro_analysis,
-               "investment_view": investment_view, "special_items_analysis": special_items_analysis, "cash_flow_analysis": cash_flow_analysis, "cash_flow_ratio_matrix": cash_flow_ratio_matrix, "cross_module_insights": cross_module_insights, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "analyst_findings": analyst_findings[:5], "special_items": analyze_special_items_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"short_findings":[],"excerpt_windows":[],"manual_review_priority":"High"}, "summary": filing_text_summary}}
+               "investment_view": investment_view, "special_items_analysis": special_items_analysis, "cash_flow_analysis": cash_flow_analysis, "cash_flow_ratio_matrix": cash_flow_ratio_matrix, "cross_module_insights": cross_module_insights, "data_completeness": completeness, "analysis_window": analysis_window, "metric_sources": metric_sources, "top_attention_points": top_attention, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "analyst_findings": analyst_findings[:5], "special_items": analyze_special_items_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"short_findings":[],"excerpt_windows":[],"manual_review_priority":"High"}, "summary_cards": {"filing_text_risk": filing_text_summary.get("filing_text_risk_level"), "latest_10k_date": filing_10k.get("filing_date"), "latest_10q_date": filing_10q.get("filing_date"), "top_sec_finding": analyst_findings[0]["finding"] if analyst_findings else "Unavailable", "source_coverage": analysis_window["coverage_status"]}, "summary": filing_text_summary}}
         return jsonify(out)
     except Exception as e:
         print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
@@ -1055,7 +1095,12 @@ def api_screener():
             special = data.get("special_items_analysis", {})
             cfa = data.get("cash_flow_analysis", {})
             cm = cfa.get("metrics", {})
-            rows.append({"Ticker": ticker, "Tax Risk": data["tax_analysis"].get("tax_risk_level", "Unknown"), "Quarterly Risk": data["quarterly_analysis"].get("quarterly_risk_level", "Unknown"), "Debt Risk": data["debt_analysis"].get("risk_level", "Unknown"), "Cash Flow Risk": cfa.get("risk_level", "Unknown"), "CFO / NI": cm.get("cfo_to_net_income"), "FCF Margin": cm.get("fcf_margin"), "Accrual Ratio": cm.get("accrual_ratio"), "Cross-Module Main Insight": (data.get("cross_module_insights") or ["Unavailable"])[0], "Forensic View": data["investment_view"].get("forensic_view", "INCONCLUSIVE")})
+            aw = data.get("analysis_window", {})
+            main_src = "partial"
+            ms = data.get("metric_sources", {})
+            if ms and all(v.get("available") for v in ms.values()):
+                main_src = "yfinance ok + SEC facts ok"
+            rows.append({"Ticker": ticker, "Analysis Window": aw.get("selected_period", "5y"), "Overall Forensic Score": data.get("data_completeness", {}).get("score"), "Cash Flow Risk": cfa.get("risk_level", "Unknown"), "Tax Risk": data["tax_analysis"].get("tax_risk_level", "Unknown"), "Debt Risk": data["debt_analysis"].get("risk_level", "Unknown"), "Special Items Risk": data.get("special_items_analysis", {}).get("risk_level", "Unknown"), "SEC Text Risk": data.get("sec_filing_intelligence", {}).get("summary", {}).get("filing_text_risk_level", "Unknown"), "Data Completeness": data.get("data_completeness", {}).get("level", "Unknown"), "Top Attention Point": (data.get("top_attention_points") or [{"point":"Unavailable"}])[0].get("point"), "Main Source": main_src})
         except Exception as e:
             print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
             traceback.print_exc()
