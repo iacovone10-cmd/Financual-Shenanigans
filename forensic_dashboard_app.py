@@ -12,7 +12,9 @@ import yfinance as yf
 from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
-SEC_HEADERS = {"User-Agent": "FinancialShenanigans research@example.com"}
+SEC_USER_AGENT = "FinancialShenanigans/1.0 contact@example.com"
+SEC_HEADERS = {"User-Agent": SEC_USER_AGENT}
+SEC_TICKER_CIK_CACHE: dict[str, str] = {}
 SEC_SUBMISSIONS_CACHE: dict[str, dict[str, Any]] = {}
 SEC_FILING_TEXT_CACHE: dict[str, dict[str, Any]] = {}
 SEC_COMPANY_FACTS_CACHE: dict[str, dict[str, Any]] = {}
@@ -196,11 +198,32 @@ def extract_tax_rows_from_sec(ticker: str) -> list[dict[str, Any]]:
 
 
 def get_cik_from_ticker(ticker: str) -> str | None:
-    try:
-        cik = yf.Ticker(ticker).info.get("cik")
-        return f"{int(cik):010d}" if cik is not None else None
-    except Exception:
+    symbol = (ticker or "").upper().strip()
+    if not symbol:
         return None
+    if symbol in SEC_TICKER_CIK_CACHE:
+        return SEC_TICKER_CIK_CACHE[symbol]
+    try:
+        r = requests.get("https://www.sec.gov/files/company_tickers.json", headers=SEC_HEADERS, timeout=20)
+        if r.ok:
+            payload = r.json()
+            for row in payload.values() if isinstance(payload, dict) else []:
+                if str(row.get("ticker", "")).upper() == symbol:
+                    cik = f"{int(row.get('cik_str')):010d}"
+                    SEC_TICKER_CIK_CACHE[symbol] = cik
+                    return cik
+    except Exception as e:
+        print(f"[WARN] SEC ticker mapping failed for {symbol}: {e}")
+
+    try:
+        cik = yf.Ticker(symbol).info.get("cik")
+        if cik is not None:
+            cik_fmt = f"{int(cik):010d}"
+            SEC_TICKER_CIK_CACHE[symbol] = cik_fmt
+            return cik_fmt
+    except Exception as e:
+        print(f"[WARN] yfinance CIK fallback failed for {symbol}: {e}")
+    return None
 
 
 def get_sec_submissions(cik: str) -> dict[str, Any] | None:
@@ -339,7 +362,7 @@ def analyze_revenue_and_nonrecurring_text(filing_text: str) -> dict[str, Any]:
 
 def build_filing_text_forensic_score(text_analyses: dict[str, Any]) -> dict[str, Any]:
     if not text_analyses:
-        return {"filing_text_score":0,"filing_text_risk_level":"Unknown","top_text_red_flags":["SEC filing text unavailable"],"most_relevant_excerpts":[],"filing_sources":[]}
+        return {"filing_text_score":None,"filing_text_risk_level":"Unknown","top_text_red_flags":["SEC filing text unavailable"],"most_relevant_excerpts":[],"filing_sources":[]}
     score=0; flags=[]; excerpts=[]
     for key in ["tax","receivables","inventory","debt","revenue_nonrecurring"]:
         a=text_analyses.get(key,{})
@@ -533,8 +556,10 @@ function render(d){
   $('complete').innerHTML = `<div class="v">${n(comp.score)} / 100</div><div>${pill(comp.level)}</div><div class="k" style="margin-top:10px">Missing Fields</div>${reasonList(comp.missing_fields)}`;
 
   const k=filing.latest_10k||{}, qf=filing.latest_10q||{};
+  const diag=filing.diagnostics||{};
   const link=(u)=>u?`<a href="${u}" target="_blank">Open SEC filing</a>`:'—';
-  $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>
+  const unavailableMsg=(!diag.filing_text_downloaded)?'<div class="muted">SEC filing unavailable - check CIK mapping or SEC request</div>':'';
+  $('filingintel').innerHTML=`<div>${pill(fs.filing_text_risk_level)} Score: ${n(fs.filing_text_score)}</div>${unavailableMsg}
   <table><tr><th>Form</th><th>Date</th><th>Link</th></tr><tr><td>10-K</td><td>${k.filing_date||'—'}</td><td>${link(k.filing_url)}</td></tr><tr><td>10-Q</td><td>${qf.filing_date||'—'}</td><td>${link(qf.filing_url)}</td></tr></table>
   <div class="k" style="margin-top:10px">Top Red Flags</div>${reasonList(fs.top_text_red_flags)}
   <div class="k" style="margin-top:10px">Extracted Excerpts</div>${reasonList(fs.most_relevant_excerpts)}
@@ -542,7 +567,8 @@ function render(d){
   <div class="k" style="margin-top:10px">Receivables / Allowance Intelligence</div>${reasonList((filing.receivables||{}).flags)}
   <div class="k" style="margin-top:10px">Inventory Footnote Intelligence</div>${reasonList((filing.inventory||{}).flags)}
   <div class="k" style="margin-top:10px">Debt & Liquidity Footnote Intelligence</div>${reasonList((filing.debt||{}).flags)}
-  <div class="k" style="margin-top:10px">Revenue Recognition & One-Off Items</div>${reasonList((filing.revenue_nonrecurring||{}).flags)}`;
+  <div class="k" style="margin-top:10px">Revenue Recognition & One-Off Items</div>${reasonList((filing.revenue_nonrecurring||{}).flags)}
+  <div class="k" style="margin-top:10px">Diagnostics</div>${reasonList([`cik_found: ${diag.cik_found}`,`submissions_loaded: ${diag.submissions_loaded}`,`latest_10k_found: ${diag.latest_10k_found}`,`latest_10q_found: ${diag.latest_10q_found}`,`filing_text_downloaded: ${diag.filing_text_downloaded}`,`error: ${diag.error||'None'}`])}`;
 }
 
 
@@ -595,13 +621,17 @@ def api_analyze():
         filing_10k = get_latest_filing_metadata(ticker, "10-K")
         filing_10q = get_latest_filing_metadata(ticker, "10-Q")
         filing_sources = [x for x in [filing_10k.get("filing_url"), filing_10q.get("filing_url")] if x]
-        filing_text = clean_sec_html_to_text(download_sec_filing_html(filing_10k.get("filing_url")) + " " + download_sec_filing_html(filing_10q.get("filing_url")))
+        filing_html_10k = download_sec_filing_html(filing_10k.get("filing_url"))
+        filing_html_10q = download_sec_filing_html(filing_10q.get("filing_url"))
+        filing_text = clean_sec_html_to_text(filing_html_10k + " " + filing_html_10q)
         tax_text = analyze_tax_footnote_text(filing_text) if filing_text else {"tax_text_risk_level":"Unknown","tax_text_flags":["SEC filing text unavailable"],"tax_keyword_hits":[],"tax_excerpt_windows":[],"manual_review_priority":"High"}
         recv_text = analyze_receivables_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         inv_text = analyze_inventory_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         debt_text = analyze_debt_footnote_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         rev_text = analyze_revenue_and_nonrecurring_text(filing_text) if filing_text else {"risk_level":"Unknown","flags":["SEC filing text unavailable"],"keyword_hits":[],"excerpt_windows":[],"manual_review_priority":"High"}
         filing_text_summary = build_filing_text_forensic_score({"tax":tax_text,"receivables":recv_text,"inventory":inv_text,"debt":debt_text,"revenue_nonrecurring":rev_text,"sources":filing_sources})
+        if not filing_text:
+            filing_text_summary = {"filing_text_score": None, "filing_text_risk_level": "Unknown", "top_text_red_flags": ["SEC filing text unavailable"], "most_relevant_excerpts": [], "filing_sources": filing_sources}
         tax_analysis["tax_text_flags"] = tax_text.get("tax_text_flags",[])
         tax_analysis["tax_excerpt_windows"] = tax_text.get("tax_excerpt_windows",[])
         tax_analysis["sec_filing_sources"] = filing_sources
@@ -612,9 +642,10 @@ def api_analyze():
         investment_view = build_investment_view(locals(), completeness)
         if filing_text_summary.get("filing_text_risk_level") == "High" and completeness.get("level") == "Weak":
             investment_view["forensic_view"] = "INCONCLUSIVE"
+        filing_diagnostics = {"cik_found": bool(filing_10k.get("cik") or filing_10q.get("cik")), "submissions_loaded": bool((filing_10k.get("cik") or filing_10q.get("cik")) and (get_sec_submissions((filing_10k.get("cik") or filing_10q.get("cik"))) is not None)), "latest_10k_found": bool(filing_10k.get("available")), "latest_10q_found": bool(filing_10q.get("available")), "filing_text_downloaded": bool(filing_text), "error": None}
         out = {"ticker": ticker, "tax_analysis": tax_analysis, "quarterly_analysis": quarterly_analysis, "inventory_analysis": inventory_analysis,
                "receivables_analysis": receivables_analysis, "debt_analysis": debt_analysis, "macro_analysis": macro_analysis,
-               "investment_view": investment_view, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "summary": filing_text_summary}}
+               "investment_view": investment_view, "data_completeness": completeness, "sec_filing_intelligence": {"latest_10k": filing_10k, "latest_10q": filing_10q, "diagnostics": filing_diagnostics, "sections": extract_filing_sections(filing_text), "tax": tax_text, "receivables": recv_text, "inventory": inv_text, "debt": debt_text, "revenue_nonrecurring": rev_text, "summary": filing_text_summary}}
         return jsonify(out)
     except Exception as e:
         print(f"[ERROR] {ticker}: {type(e).__name__}: {e}")
