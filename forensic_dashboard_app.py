@@ -235,26 +235,62 @@ input,select,button{padding:10px;border-radius:8px;border:1px solid #2e3d5e;back
 </style></head><body><div class='wrap'>
 <h1>Forensic Command Center</h1>
 <div class='card row'><input id='ticker' value='AAPL'/><select id='period'><option value='1y'>1Y</option><option value='3y'>3Y</option><option value='5y' selected>5Y</option></select><button onclick='runAnalyze()'>Analyze</button></div>
-<div id='analysis_window' class='card'></div><div id='top_points' class='card'></div><div id='ratio_matrix' class='card'></div><div id='cash_flow' class='card'></div><div id='tax' class='card'></div><div id='debt' class='card'></div><div id='sec' class='card'></div>
+<div id='analysisWindow' class='card'></div><div id='topAttentionPoints' class='card'></div><div id='coreRatioMatrix' class='card'></div><div id='cashFlowAnalysis' class='card'></div><div id='taxAnalysis' class='card'></div><div id='debtAnalysis' class='card'></div><div id='secFilingIntelligence' class='card'></div>
+<div id='screener' class='card'></div><div id='notesWorkspace' class='card'></div><div id='topCards' class='card'></div><div id='investmentView' class='card'></div><div id='dataCompleteness' class='card'></div><div id='quarterlyAnalysis' class='card'></div>
 </div>
 <script>
-function safeSet(id, html) { const el = document.getElementById(id); if (el) { el.innerHTML = html; } else { console.warn('Missing element:', id); } }
+function byId(id) {
+  return document.getElementById(id);
+}
+
+function safeSet(id, html) {
+  const el = byId(id);
+  if (!el) {
+    console.warn('Missing DOM element:', id);
+    return;
+  }
+  el.innerHTML = html ?? '';
+}
+
+function safeText(id, text) {
+  const el = byId(id);
+  if (!el) {
+    console.warn('Missing DOM element:', id);
+    return;
+  }
+  el.textContent = text ?? '';
+}
+
+function safeClass(id, className) {
+  const el = byId(id);
+  if (!el) {
+    console.warn('Missing DOM element:', id);
+    return;
+  }
+  el.className = className;
+}
 function fmt(v,p=false){if(v===null||v===undefined) return 'Unavailable'; return p ? (v*100).toFixed(1)+'%' : Number(v).toFixed(2)}
 function renderMetric(name,m){return `<tr><td>${name}</td><td>${fmt(m.value)}</td><td>${m.source}</td><td>${m.missing_reason||''}</td></tr>`}
 function sectionTable(title,obj){let rows=''; Object.entries(obj).forEach(([k,v])=>rows+=renderMetric(k,v)); return `<h3>${title}</h3><table width='100%'><tr><th>Metric</th><th>Value</th><th>Source</th><th>Notes</th></tr>${rows}</table>`}
 async function runAnalyze(){
- const ticker=document.getElementById('ticker')?.value||'AAPL'; const period=document.getElementById('period')?.value||'5y';
+ const ticker=byId('ticker')?.value||'AAPL'; const period=byId('period')?.value||'5y';
  const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker,period})}); const d=await r.json();
- safeSet('analysis_window',`<h3>Analysis Window</h3><div class='grid'><div>Selected: ${d.analysis_window.selected}</div><div>Years: ${d.analysis_window.years}</div><div>Quarters: ${d.analysis_window.quarters}</div><div>Status: ${d.analysis_window.status}</div></div>`);
- safeSet('top_points',`<h3>Top Attention Points</h3>`+d.top_attention_points.map(p=>`<div class='pill'>${p.severity}: ${p.text}</div>`).join(''));
- safeSet('ratio_matrix',sectionTable('Core Ratio Matrix',Object.assign({},d.ratios.cash_flow,d.ratios.tax,d.ratios.debt,d.ratios.working_capital)));
- safeSet('cash_flow',sectionTable('Cash Flow Analysis',d.ratios.cash_flow));
- safeSet('tax',sectionTable('Tax Analysis',d.ratios.tax));
- safeSet('debt',sectionTable('Debt & Interest',d.ratios.debt));
+ safeSet('analysisWindow',`<h3>Analysis Window</h3><div class='grid'><div>Selected: ${d.analysis_window.selected}</div><div>Years: ${d.analysis_window.years}</div><div>Quarters: ${d.analysis_window.quarters}</div><div>Status: ${d.analysis_window.status}</div></div>`);
+ safeSet('topAttentionPoints',`<h3>Top Attention Points</h3>`+(d.top_attention_points||[]).map(p=>`<div class='pill'>${p.severity}: ${p.text}</div>`).join(''));
+ safeSet('coreRatioMatrix',sectionTable('Core Ratio Matrix',Object.assign({},d.ratios.cash_flow,d.ratios.tax,d.ratios.debt,d.ratios.working_capital)));
+ safeSet('cashFlowAnalysis',sectionTable('Cash Flow Analysis',d.ratios.cash_flow));
+ safeSet('taxAnalysis',sectionTable('Tax Analysis',d.ratios.tax));
+ safeSet('debtAnalysis',sectionTable('Debt & Interest',d.ratios.debt));
+ safeSet('dataCompleteness',`<h3>Data Completeness</h3><div class='grid'><div>Years Covered: ${d.coverage.years_covered}</div><div>Quarterly Coverage: ${d.coverage.quarterly_coverage}</div><div>Status: ${d.coverage.data_completeness}</div><div>SEC Facts: ${d.coverage.sec_company_facts}</div></div>`);
+ safeSet('quarterlyAnalysis',`<h3>Quarterly Analysis</h3><div>${d.analysis_window.quarters} quarters (${d.analysis_window.status})</div>`);
  const insights=(d.sec_analysis.insights||[]).map(i=>`<li><b>${i.severity}</b> - ${i.title}: ${i.evidence} <i>(${i.source})</i></li>`).join('');
  const raws=(d.sec_analysis.raw_excerpts||[]).map(x=>`<details><summary>Raw excerpt</summary><pre>${x}</pre></details>`).join('');
  const filings=(d.sec_analysis.filings||[]).map(f=>`<li><a href='${f.url}' target='_blank'>${f.title}</a> (${f.form})</li>`).join('');
- safeSet('sec',`<h3>SEC Filing Intelligence</h3><ul>${filings}</ul><ul>${insights}</ul>${raws}`);
+ safeSet('secFilingIntelligence',`<h3>SEC Filing Intelligence</h3><ul>${filings}</ul><ul>${insights}</ul>${raws}`);
+ safeSet('topCards',`<h3>Top Cards</h3><div class='pill'>${d.ticker}</div><div class='pill'>Window: ${d.analysis_window.selected}</div>`);
+ safeSet('investmentView',`<h3>Investment View</h3><div>Quick view generated for ${d.ticker}.</div>`);
+ safeSet('notesWorkspace',`<h3>Notes Workspace</h3><div>Use this area for analyst notes.</div>`);
+ safeSet('screener',`<h3>Screener</h3><div>Screener endpoint ready at /api/screener.</div>`);
 }
 runAnalyze();
 </script></body></html>
