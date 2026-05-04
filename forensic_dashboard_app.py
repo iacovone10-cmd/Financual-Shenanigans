@@ -254,6 +254,8 @@ def analyze_ticker(ticker: str, period: str) -> dict[str, Any]:
         "core_ratios": core_ratios,
         "cash_flow_analysis": {"risk_level": "High" if cash_flags else "Low", "score": None, "data_status": "Available", "flags": cash_flags or ["No critical cash flow flags from available data."], "metrics": {"CFO": fmt_money(cfo), "Net Income": fmt_money(ni), "FCF": fmt_money(fcf), "CFO / NI": fmt_x(safe_div(cfo, ni)), "FCF Margin": fmt_pct(safe_div(fcf, revenue))}, "findings": []},
         "debt_analysis": {"risk_level": "High" if debt_flags else "Low", "score": None, "data_status": "Available", "flags": debt_flags or ["No critical debt flags from available data."], "metrics": {"total debt": fmt_money(debt), "debt/CFO": fmt_x(safe_div(debt, cfo)), "interest coverage": fmt_x(safe_div(first_row(fin_a, ["EBIT"]), ie))}, "findings": []},
+        "tax_analysis": default_module(),
+        "working_capital_analysis": default_module(),
         "capital_allocation_analysis": default_module(),
         "geographic_segment_analysis": default_module(),
         "insider_transactions_analysis": insider,
@@ -272,29 +274,62 @@ HTML = """
 <script src='https://cdn.jsdelivr.net/npm/chart.js'></script>
 <style>body{font-family:Inter,Arial;background:#0b1220;color:#eaf2ff;margin:0}.wrap{max-width:1300px;margin:0 auto;padding:16px}.sticky{position:sticky;top:0;background:#0f182a;padding:12px;border-bottom:1px solid #294163;z-index:9;display:flex;gap:8px;align-items:center}.card{background:#121d31;border:1px solid #2d4669;border-radius:12px;padding:12px;margin:12px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.kpi{background:#0f182a;padding:8px;border-radius:8px}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid #28415f;padding:7px;text-align:left}.badge{background:#25456d;padding:2px 8px;border-radius:999px}.chart{height:260px}</style>
 </head><body><div class='sticky'><input id='ticker' value='TSLA'><select id='period'><option value='1y'>1Y</option><option value='3y'>3Y</option><option value='5y' selected>5Y</option></select><button onclick='runAnalyze()'>Analyze</button></div><div class='wrap'>
-<div id='verdict' class='card'></div><div id='window' class='card'></div><div id='attention' class='card'></div>
-<div class='card'><h3>Multi-Year Forensic Comparison</h3><div id='multi'></div></div>
+<div id='statusMessage' class='card'></div>
+<div id='executiveVerdict' class='card'></div><div id='analysisWindow' class='card'></div><div id='topAttentionPoints' class='card'></div>
+<div id='annualComparison' class='card'><h3>Multi-Year Forensic Comparison</h3><div id='annualComparisonContent'></div></div>
 <div class='grid'><div class='card'><canvas id='c1' class='chart'></canvas></div><div class='card'><canvas id='c2' class='chart'></canvas></div><div class='card'><canvas id='c3' class='chart'></canvas></div><div class='card'><canvas id='c4' class='chart'></canvas></div></div>
-<div id='ratios' class='card'></div><div id='sec' class='card'></div><div id='insider' class='card'></div><div id='notes' class='card'></div></div>
+<div id='coreRatios' class='card'></div><div id='cashFlow' class='card'></div><div id='debtRisk' class='card'></div><div id='taxRisk' class='card'></div><div id='workingCapital' class='card'></div><div id='capitalAllocation' class='card'></div><div id='secIntel' class='card'></div><div id='screener' class='card'></div><div id='notes' class='card'></div></div>
 <script>
 const charts={}; function byId(i){return document.getElementById(i)}
 function safeSet(id,html){const el=byId(id); if(el) el.innerHTML=html||''}
 function draw(id,cfg){if(charts[id]) charts[id].destroy(); const el=byId(id); if(!el) return; charts[id]=new Chart(el,cfg)}
 function num(v){return (v===null||v===undefined)?null:v}
-async function runAnalyze(){const ticker=byId('ticker').value||'TSLA';const period=byId('period').value||'5y';const res=await fetch(`/api/analyze?ticker=${encodeURIComponent(ticker)}&period=${encodeURIComponent(period)}`);const d=await res.json();
-const v=d.executive_verdict||{}; safeSet('verdict',`<h2>Executive Verdict</h2><b>${v.forensic_view||'INCONCLUSIVE'}</b> <span class='badge'>Risk: ${v.risk_level||'Unknown'}</span> <span class='badge'>Confidence: ${v.confidence||'Low'}</span><div>${v.label||''}</div>`);
-const w=d.analysis_window||{}; safeSet('window',`<h3>Analysis Window</h3><div>Period: ${w.selected_period||'5y'}</div><div>Annual coverage: ${w.annual_years_available||0}/${w.annual_years_requested||0}</div><div>Quarterly coverage: ${w.quarterly_periods_available||0}/${w.quarterly_periods_requested||0}</div><div>${w.coverage_status||'Unknown'} — ${w.coverage_note||''}</div>`);
-safeSet('attention',`<h3>Top Attention Points</h3>${(d.top_attention_points||[]).map(p=>`<div class='kpi'><b>${p.severity}</b> ${p.area}: ${p.point}<div>${p.why_it_matters}</div><i>${p.where_to_verify}</i></div>`).join('')||'Unavailable'}`)
+function sectionUnavailable(){return "Section unavailable: missing API field"}
+function normalizeApiResponse(data){
+  const d = data || {};
+  return {
+    ...d,
+    executive_verdict: d.executive_verdict ?? null,
+    analysis_window: d.analysis_window ?? null,
+    top_attention_points: d.top_attention_points ?? null,
+    annual_comparison: d.annual_comparison ?? null,
+    core_ratios: d.core_ratios ?? null,
+    cash_flow_analysis: d.cash_flow_analysis ?? null,
+    debt_analysis: d.debt_analysis ?? null,
+    tax_analysis: d.tax_analysis ?? null,
+    working_capital_analysis: d.working_capital_analysis ?? null,
+    capital_allocation_analysis: d.capital_allocation_analysis ?? null,
+    sec_filing_intelligence: d.sec_filing_intelligence ?? null
+  };
+}
+async function runAnalyze(){const ticker=byId('ticker').value||'TSLA';const period=byId('period').value||'5y';
+safeSet('statusMessage',"<b>Loading analysis...</b>");
+try {
+const res=await fetch(`/api/analyze?ticker=${ticker}&period=${period}`);
+const data=await res.json();
+console.log("API response", data);
+if(!res.ok || data.error){throw new Error(data.error||"Failed to load analysis")}
+const d=normalizeApiResponse(data);
+safeSet('statusMessage', "");
+try {const v=d.executive_verdict||{}; safeSet('executiveVerdict', d.executive_verdict?`<h2>Executive Verdict</h2><b>${v.forensic_view||'INCONCLUSIVE'}</b> <span class='badge'>Risk: ${v.risk_level||'Unknown'}</span> <span class='badge'>Confidence: ${v.confidence||'Low'}</span><div>${v.label||''}</div>`:sectionUnavailable());} catch(e){safeSet('executiveVerdict',sectionUnavailable())}
+try {const w=d.analysis_window||{}; safeSet('analysisWindow', d.analysis_window?`<h3>Analysis Window</h3><div>Period: ${w.selected_period||'5y'}</div><div>Annual coverage: ${w.annual_years_available||0}/${w.annual_years_requested||0}</div><div>Quarterly coverage: ${w.quarterly_periods_available||0}/${w.quarterly_periods_requested||0}</div><div>${w.coverage_status||'Unknown'} — ${w.coverage_note||''}</div>`:sectionUnavailable());} catch(e){safeSet('analysisWindow',sectionUnavailable())}
+try {safeSet('topAttentionPoints', d.top_attention_points?`<h3>Top Attention Points</h3>${(d.top_attention_points||[]).map(p=>`<div class='kpi'><b>${p.severity}</b> ${p.area}: ${p.point}<div>${p.why_it_matters}</div><i>${p.where_to_verify}</i></div>`).join('')||'Unavailable'}`:sectionUnavailable())} catch(e){safeSet('topAttentionPoints',sectionUnavailable())}
 const rows=(d.annual_comparison||{}).rows||[]; const labels=rows.map(r=>r.fiscal_year).reverse();
-safeSet('multi',`<table><tr><th>Year</th><th>Revenue</th><th>NI</th><th>CFO</th><th>FCF</th><th>CFO/NI</th><th>Debt/CFO</th><th>ETR</th></tr>${rows.map(r=>`<tr><td>${r.fiscal_year}</td><td>${r.revenue??'Unavailable'}</td><td>${r.net_income??'Unavailable'}</td><td>${r.cfo??'Unavailable'}</td><td>${r.fcf??'Unavailable'}</td><td>${r.cfo_to_net_income??'Unavailable'}</td><td>${r.debt_to_cfo??'Unavailable'}</td><td>${r.etr??'Unavailable'}</td></tr>`).join('')}</table>`)
+try {safeSet('annualComparisonContent', d.annual_comparison?`<table><tr><th>Year</th><th>Revenue</th><th>NI</th><th>CFO</th><th>FCF</th><th>CFO/NI</th><th>Debt/CFO</th><th>ETR</th></tr>${rows.map(r=>`<tr><td>${r.fiscal_year}</td><td>${r.revenue??'Unavailable'}</td><td>${r.net_income??'Unavailable'}</td><td>${r.cfo??'Unavailable'}</td><td>${r.fcf??'Unavailable'}</td><td>${r.cfo_to_net_income??'Unavailable'}</td><td>${r.debt_to_cfo??'Unavailable'}</td><td>${r.etr??'Unavailable'}</td></tr>`).join('')}</table>`:sectionUnavailable())} catch(e){safeSet('annualComparisonContent',sectionUnavailable())}
 draw('c1',{type:'line',data:{labels,datasets:[{label:'Net Income',data:rows.map(r=>num(r.net_income)).reverse()},{label:'CFO',data:rows.map(r=>num(r.cfo)).reverse()},{label:'FCF',data:rows.map(r=>num(r.fcf)).reverse()}]}})
 draw('c2',{type:'line',data:{labels,datasets:[{label:'CFO/NI',data:rows.map(r=>num(r.cfo_to_net_income)).reverse()},{label:'Accrual Ratio',data:rows.map(r=>num(r.accrual_ratio)).reverse()},{label:'FCF Margin',data:rows.map(r=>num(r.fcf_margin)).reverse()}]}})
 draw('c3',{type:'line',data:{labels,datasets:[{label:'Debt/CFO',data:rows.map(r=>num(r.debt_to_cfo)).reverse()},{label:'Interest Coverage',data:rows.map(r=>num(r.interest_coverage)).reverse()}]}})
 draw('c4',{type:'line',data:{labels,datasets:[{label:'AR/Revenue',data:rows.map(r=>num(r.ar_to_revenue)).reverse()},{label:'Inventory/Revenue',data:rows.map(r=>num(r.inventory_to_revenue)).reverse()},{label:'ETR',data:rows.map(r=>num(r.etr)).reverse()}]}})
-safeSet('ratios',`<h3>Core Ratio Matrix</h3><table><tr><th>Category</th><th>Name</th><th>Value</th><th>Status</th><th>Why it matters</th><th>10-K/10-Q verify</th><th>Source</th></tr>${(d.core_ratios||[]).map(r=>`<tr><td>${r.category}</td><td>${r.name}</td><td>${r.display_value}</td><td>${r.status}</td><td><details><summary>Explanation</summary>${r.explanation}</details></td><td>${r.manual_check}</td><td>${r.source}</td></tr>`).join('')}</table>`)
-const s=d.sec_filing_intelligence||{};safeSet('sec',`<h3>SEC Filing Intelligence</h3><div>10-K: ${s.latest_10k?.url?`<a target='_blank' href='${s.latest_10k.url}'>${s.latest_10k.date}</a>`:'Unavailable'}</div><div>10-Q: ${s.latest_10q?.url?`<a target='_blank' href='${s.latest_10q.url}'>${s.latest_10q.date}</a>`:'Unavailable'}</div><div>Form 4: ${(s.latest_form4||[]).map(f=>`<a target='_blank' href='${f.url}'>${f.date}</a>`).join(' | ')||'Unavailable'}</div>${(s.raw_excerpts||[]).map(e=>`<details><summary>Evidence excerpt</summary>${e}</details>`).join('')}`)
-const ins=d.insider_transactions_analysis||{};safeSet('insider',`<h3>Insider Transactions</h3><div>${(ins.flags||[]).join(' ; ')}</div><div>${(ins.findings||[]).map(f=>`<div>${f.date||'Unknown'} - <a href='${f.url||'#'}' target='_blank'>Form ${f.form||'4'}</a></div>`).join('')||'Unavailable'}</div>`)
+try {safeSet('coreRatios', d.core_ratios?`<h3>Core Ratio Matrix</h3><table><tr><th>Category</th><th>Name</th><th>Value</th><th>Status</th><th>Why it matters</th><th>10-K/10-Q verify</th><th>Source</th></tr>${(d.core_ratios||[]).map(r=>`<tr><td>${r.category}</td><td>${r.name}</td><td>${r.display_value}</td><td>${r.status}</td><td><details><summary>Explanation</summary>${r.explanation}</details></td><td>${r.manual_check}</td><td>${r.source}</td></tr>`).join('')}</table>`:sectionUnavailable())} catch(e){safeSet('coreRatios',sectionUnavailable())}
+try {const c=d.cash_flow_analysis||{};safeSet('cashFlow', d.cash_flow_analysis?`<h3>Cash Flow</h3><div>Risk: ${c.risk_level||'Unknown'}</div><div>${(c.flags||[]).join(' ; ')||'Unavailable'}</div>`:sectionUnavailable())} catch(e){safeSet('cashFlow',sectionUnavailable())}
+try {const db=d.debt_analysis||{};safeSet('debtRisk', d.debt_analysis?`<h3>Debt Risk</h3><div>Risk: ${db.risk_level||'Unknown'}</div><div>${(db.flags||[]).join(' ; ')||'Unavailable'}</div>`:sectionUnavailable())} catch(e){safeSet('debtRisk',sectionUnavailable())}
+try {const tx=d.tax_analysis||{};safeSet('taxRisk', d.tax_analysis?`<h3>Tax Risk</h3><div>Risk: ${tx.risk_level||'Unknown'}</div><div>${(tx.flags||[]).join(' ; ')||'Unavailable'}</div>`:sectionUnavailable())} catch(e){safeSet('taxRisk',sectionUnavailable())}
+try {const wc=d.working_capital_analysis||{};safeSet('workingCapital', d.working_capital_analysis?`<h3>Working Capital</h3><div>Risk: ${wc.risk_level||'Unknown'}</div><div>${(wc.flags||[]).join(' ; ')||'Unavailable'}</div>`:sectionUnavailable())} catch(e){safeSet('workingCapital',sectionUnavailable())}
+try {const ca=d.capital_allocation_analysis||{};safeSet('capitalAllocation', d.capital_allocation_analysis?`<h3>Capital Allocation</h3><div>Risk: ${ca.risk_level||'Unknown'}</div><div>${(ca.flags||[]).join(' ; ')||'Unavailable'}</div>`:sectionUnavailable())} catch(e){safeSet('capitalAllocation',sectionUnavailable())}
+try {const s=d.sec_filing_intelligence||{};safeSet('secIntel', d.sec_filing_intelligence?`<h3>SEC Filing Intelligence</h3><div>10-K: ${s.latest_10k?.url?`<a target='_blank' href='${s.latest_10k.url}'>${s.latest_10k.date}</a>`:'Unavailable'}</div><div>10-Q: ${s.latest_10q?.url?`<a target='_blank' href='${s.latest_10q.url}'>${s.latest_10q.date}</a>`:'Unavailable'}</div><div>Form 4: ${(s.latest_form4||[]).map(f=>`<a target='_blank' href='${f.url}'>${f.date}</a>`).join(' | ')||'Unavailable'}</div>${(s.raw_excerpts||[]).map(e=>`<details><summary>Evidence excerpt</summary>${e}</details>`).join('')}`:sectionUnavailable())} catch(e){safeSet('secIntel',sectionUnavailable())}
+safeSet('screener', "<h3>Screener</h3>Section unavailable: missing API field");
 const key='notes_'+ticker.toUpperCase(); safeSet('notes',`<h3>Notes Workspace</h3><textarea id='nb' rows='6' style='width:100%'></textarea><button onclick='localStorage.setItem("${'${key}'}",byId("nb").value)'>Save</button>`); byId('nb').value=localStorage.getItem(key)||'';
+} catch(err) { safeSet('statusMessage', `<b>Error:</b> ${err.message||'Unable to load analysis'}`); }
 }
 runAnalyze();
 </script></body></html>
