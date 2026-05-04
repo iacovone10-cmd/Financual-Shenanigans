@@ -335,6 +335,7 @@ def analyze_ticker(ticker: str, period: str) -> dict[str, Any]:
 
 HTML = """
 <!doctype html><html><head><title>Forensic Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 body{font-family:Inter,Arial;background:#0c111b;color:#e7edf7;margin:0}.wrap{max-width:1200px;margin:20px auto;padding:0 16px}
 .bar,.card{background:#121a27;border:1px solid #2a3a55;border-radius:12px;padding:14px;margin-bottom:14px}
@@ -344,17 +345,47 @@ table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid #2a3a55;
 </style></head><body><div class='wrap'>
 <div class='bar'><input id='ticker' value='TSLA'/><select id='period'><option value='1y'>1Y</option><option value='3y'>3Y</option><option value='5y' selected>5Y</option></select><button onclick='runAnalyze()'>Analyze</button></div>
 <div id='executiveVerdict' class='card'></div><div id='attentionPoints' class='card'></div><div id='coreRatios' class='card'></div><div id='cashFlow' class='card'></div>
-<div id='debtRisk' class='card'></div><div id='taxRisk' class='card'></div><div id='secIntel' class='card'></div><div id='manualChecklist' class='card'></div><div id='screener' class='card'></div><div id='notes' class='card'></div>
+<div id='debtRisk' class='card'></div><div id='taxRisk' class='card'></div><div id='workingCapital' class='card'></div><div id='secIntel' class='card'></div><div id='manualChecklist' class='card'></div><div id='screener' class='card'></div><div id='notes' class='card'></div>
 </div><script>
 function byId(id){return document.getElementById(id)}
 function safeSet(id,html){const el=byId(id); if(!el){console.warn('Missing DOM element:',id); return;} el.innerHTML=html??''}
 let ratioFilter='All';
+const activeCharts={};
 function filteredRows(rows){return rows.filter(r=>ratioFilter==='All'||r.status===ratioFilter||r.category===ratioFilter)}
+function num(v){if(typeof v==='number'&&Number.isFinite(v)) return v; if(typeof v==='string'){const n=Number(v.replace(/[^0-9.-]/g,'')); return Number.isFinite(n)?n:null;} return null;}
+function getRatio(rows,name){return (rows||[]).find(r=>r.name===name)||null}
+function explainRatio(name,value,status){
+ const unavailable=`<div><b>${name}</b><div>Status: Unavailable. Source data required for this ratio is missing.</div></div>`;
+ if(status==='Unavailable'||value===null||value===undefined||Number.isNaN(value)) return unavailable;
+ const map={
+  'CFO / Net Income': ['What it means: compares operating cash flow with accounting profit.','How to read it: above 1.0 is generally stronger; below 1.0 means earnings are not fully converting into cash.','Why it matters: weak conversion may indicate accruals, receivables build-up or earnings quality issues.','Attention threshold: below 1.0 = Watch, below 0.8 = Risk.'],
+  'Accrual Ratio': ['What it means: measures how much of net income is not backed by operating cash flow.','How to read it: high positive values deserve review.','Why it matters: high accrual dependence can precede earnings disappointment.','Attention threshold: above 0.10 = Watch, above 0.20 = Risk.'],
+  'ETR': ['What it means: effective tax rate = tax expense / pretax income.','How to read it: very low, negative or highly volatile values require tax footnote review.','Why it matters: tax benefits can inflate net income.','Attention threshold: below 5% or above 40% = Risk review.'],
+  'Debt / CFO': ['What it means: total debt compared with annual operating cash flow.','How to read it: higher values mean more years of CFO would be needed to repay debt.','Why it matters: high debt/CFO increases refinancing and liquidity risk.','Attention threshold: above 3x = Watch, above 6x = Risk.'],
+  'Interest Coverage': ['What it means: operating income divided by interest expense.','How to read it: below 2x is a warning; below 1x is critical.','Why it matters: shows whether earnings can cover interest costs.','Attention threshold: below 5x = Watch, below 2x = Risk.'],
+  'AR / Revenue': ['What it means: receivables as a percentage of revenue.','How to read it: rising AR relative to revenue may indicate slower collections.','Why it matters: can signal aggressive revenue recognition or customer payment stress.','Attention threshold: materially above peer/own history = Watch.'],
+  'Inventory / Revenue': ['What it means: inventory relative to sales.','How to read it: rising inventory relative to revenue may indicate demand weakness.','Why it matters: can lead to markdowns or write-downs.','Attention threshold: persistent rise without revenue growth = Risk.'],
+  'Buybacks / CFO': ['What it means: share repurchases compared with operating cash flow.','How to read it: high values may indicate aggressive capital return.','Why it matters: buybacks can boost EPS without improving operations.','Attention threshold: above 50% = Watch, above 100% = Risk.']
+ };
+ const lines=map[name]||['What it means: core forensic quality ratio.','How to read it: compare trend and peer levels.','Why it matters: persistent weakness raises forensic risk.','Attention threshold: Watch and Risk tags flag escalation.'];
+ return `<div><b>${name}</b><div>Current status: <span class='badge'>${status}</span></div>${lines.map(x=>`<div>${x}</div>`).join('')}</div>`;
+}
+function destroyExistingChart(id){if(activeCharts[id]){activeCharts[id].destroy(); delete activeCharts[id];}}
+function renderChartIfData(canvasId,config,emptyMessageId){
+ const canvas=byId(canvasId); const empty=byId(emptyMessageId);
+ if(!canvas||!empty){return;}
+ destroyExistingChart(canvasId);
+ if(typeof Chart==='undefined'){empty.textContent='Chart library unavailable.'; return;}
+ const hasData=(config?.data?.datasets||[]).some(ds=>Array.isArray(ds.data)&&ds.data.some(v=>v!==null&&v!==undefined));
+ if(!hasData){empty.textContent='Historical series unavailable; showing latest available ratio snapshot.'; return;}
+ empty.textContent='';
+ try{activeCharts[canvasId]=new Chart(canvas,config);}catch(e){empty.textContent='Unable to render chart for this section.';}
+}
 function renderRatios(rows){
  const filters=['All','Risk','Watch','Unavailable','Cash Flow','Debt','Tax'];
  const btns=filters.map(f=>`<button onclick="ratioFilter='${f}';renderCore(window.lastData)">${f}</button>`).join(' ');
- const body=filteredRows(rows).map(r=>`<tr><td>${r.category}</td><td>${r.name}</td><td>${r.display_value}</td><td><span class='badge'>${r.status}</span></td><td>${r.interpretation}</td><td>${r.source}</td></tr>`).join('');
- return `<h3>Core Ratios</h3><div>${btns}</div><table><tr><th>Category</th><th>Ratio</th><th>Value</th><th>Status</th><th>Interpretation</th><th>Source</th></tr>${body}</table>`
+ const body=filteredRows(rows).map(r=>`<tr><td>${r.category}</td><td>${r.name}<details><summary>Explain</summary>${explainRatio(r.name,r.value,r.status)}</details></td><td>${r.display_value}</td><td><span class='badge'>${r.status}</span></td><td>${r.interpretation}</td><td>${r.source}</td></tr>`).join('');
+ return `<h3>Core Ratios</h3><div>${btns}</div><canvas id='ratioRiskChart' height='120'></canvas><div id='ratioRiskChartEmpty'></div><table><tr><th>Category</th><th>Ratio</th><th>Value</th><th>Status</th><th>Interpretation</th><th>Source</th></tr>${body}</table>`
 }
 function renderCore(d){safeSet('coreRatios',renderRatios(d.core_ratios||[]))}
 async function runAnalyze(){
@@ -364,11 +395,21 @@ async function runAnalyze(){
  safeSet('executiveVerdict',`<h2>Executive Verdict</h2><div class='grid'><div><b>${v.forensic_view||'INCONCLUSIVE'}</b> <span class='badge'>Risk: ${v.risk_level||'Unknown'}</span> <span class='badge'>Confidence: ${v.confidence||'Low'}</span></div><div>${v.summary||''}</div></div><div><b>Main reasons:</b> ${(v.main_reasons||[]).join('; ')}</div><div><b>Main risks:</b> ${(v.main_risks||[]).join('; ')}</div>`);
  safeSet('attentionPoints',`<h3>Top Attention Points</h3><div class='cards'>${(d.top_attention_points||[]).slice(0,8).map(p=>`<div class='card'><b>${p.severity} • ${p.area}</b><div>${p.point}</div><div>${p.why_it_matters}</div><div><i>${p.where_to_check}</i></div><div>${p.source}</div></div>`).join('')}</div>`);
  renderCore(d);
- const cf=d.cash_flow_analysis||{}; safeSet('cashFlow',`<h3>Cash Flow Quality</h3><div>${cf.summary||''} <span class='badge'>${cf.risk_level||'Unknown'}</span></div><div class='grid'>${Object.entries(cf.metrics||{}).map(([k,v])=>`<div><b>${k}</b><div>${v}</div></div>`).join('')}</div><div><b>Flags:</b> ${(cf.flags||[]).join('; ')||'None'}</div>`);
- const db=d.debt_analysis||{}; safeSet('debtRisk',`<h3>Debt & Interest Risk</h3><div>${db.summary||''} <span class='badge'>${db.risk_level||'Unknown'}</span></div><div class='grid'>${Object.entries(db.metrics||{}).map(([k,v])=>`<div><b>${k}</b><div>${v}</div></div>`).join('')}</div><div><b>Flags:</b> ${(db.flags||[]).join('; ')||'None'}</div>`);
- const tx=d.tax_analysis||{}; safeSet('taxRisk',`<h3>Tax / Book-vs-Tax</h3><div>${tx.summary||''} <span class='badge'>${tx.risk_level||'Unknown'}</span></div><div class='grid'>${Object.entries(tx.metrics||{}).map(([k,v])=>`<div><b>${k}</b><div>${v}</div></div>`).join('')}</div><div><b>Flags:</b> ${(tx.flags||[]).join('; ')||'None'}</div><div>Source: ${tx.source||'Unavailable'}</div>`);
+ const cf=d.cash_flow_analysis||{}; const rows=d.core_ratios||[];
+ safeSet('cashFlow',`<h3>Cash Flow Quality</h3><div class='bar'>What this section measures: earnings-to-cash conversion (CFO/NI), free cash flow after CapEx, and accrual dependence. How to interpret: Healthy if CFO tracks/exceeds NI and FCF is positive. Why it matters: weak conversion can mask earnings quality issues. <span class='badge'>${cf.risk_level||'Unknown'}</span></div><div class='grid'>${Object.entries(cf.metrics||{}).map(([k,v])=>`<div><b>${k}</b><div>${v}</div></div>`).join('')}</div><div><b>Flags:</b> ${(cf.flags||[]).join('; ')||'None'}</div><canvas id='cashFlowChart' height='120'></canvas><div id='cashFlowChartEmpty'></div>`);
+ renderChartIfData('cashFlowChart',{type:'bar',data:{labels:['CFO','Net Income','FCF'],datasets:[{label:'USD',data:[num(cf.metrics?.CFO),num(cf.metrics?.['Net Income']),num(cf.metrics?.FCF)],backgroundColor:['#60a5fa','#34d399','#f59e0b']}]}},'cashFlowChartEmpty');
+ const db=d.debt_analysis||{}; safeSet('debtRisk',`<h3>Debt & Interest Risk</h3><div class='bar'>What this section measures: leverage burden (Debt/CFO) and ability to service interest from EBIT/CFO. How to interpret: lower Debt/CFO and higher coverage are safer. Why it matters: weak coverage can force refinancing under stress. <span class='badge'>${db.risk_level||'Unknown'}</span></div><div class='grid'>${Object.entries(db.metrics||{}).map(([k,v])=>`<div><b>${k}</b><div>${v}</div></div>`).join('')}</div><div><b>Flags:</b> ${(db.flags||[]).join('; ')||'None'}</div><canvas id='debtCoverageChart' height='120'></canvas><div id='debtCoverageChartEmpty'></div>`);
+ const debtCfo=num(getRatio(rows,'Debt / CFO')?.value), intCov=num(getRatio(rows,'Interest Coverage')?.value), cashInt=num(getRatio(rows,'Cash Interest Coverage')?.value);
+ renderChartIfData('debtCoverageChart',{type:'bar',data:{labels:['Debt/CFO','Interest Coverage','Cash Interest Coverage'],datasets:[{label:'x',data:[debtCfo,intCov,cashInt],backgroundColor:['#f97316','#22c55e','#38bdf8']}]}},'debtCoverageChartEmpty');
+ const tx=d.tax_analysis||{}; const etr=num(getRatio(rows,'ETR')?.value); const cashTax=num(tx.metrics?.['cash tax rate']); const otherIncome=num(getRatio(rows,'Other Income / Net Income')?.value);
+ safeSet('taxRisk',`<h3>Tax / Book-vs-Tax</h3><div class='bar'>What this section measures: reported tax burden vs cash tax paid and reliance on non-operating/tax effects. How to interpret: stable mid-range ETR with reasonable cash tax rate is cleaner. Why it matters: unusual tax benefits can temporarily inflate net income. <span class='badge'>${tx.risk_level||'Unknown'}</span></div><div class='grid'>${Object.entries(tx.metrics||{}).map(([k,v])=>`<div><b>${k}</b><div>${v}</div></div>`).join('')}</div><div><b>Flags:</b> ${(tx.flags||[]).join('; ')||'None'}</div><div>Source: ${tx.source||'Unavailable'}</div><canvas id='taxChart' height='120'></canvas><div id='taxChartEmpty'></div>`);
+ renderChartIfData('taxChart',{type:'bar',data:{labels:['ETR','Cash Tax Rate','Deferred Tax Dependency Proxy'],datasets:[{label:'Ratio',data:[etr,cashTax,otherIncome],backgroundColor:['#3b82f6','#10b981','#eab308']}]}},'taxChartEmpty');
+ safeSet('workingCapital',`<h3>Working Capital</h3><div class='bar'>What this section measures: receivable/inventory intensity and estimated collection/turn days. How to interpret: rising AR/Revenue, Inventory/Revenue, DSO or DIO suggests pressure. Why it matters: working-capital strain often appears before earnings pressure.</div><canvas id='workingCapitalChart' height='120'></canvas><div id='workingCapitalChartEmpty'></div>`);
+ const arRev=num(getRatio(rows,'AR / Revenue')?.value), invRev=num(getRatio(rows,'Inventory / Revenue')?.value); const dso=arRev!==null?arRev*365:null; const dio=invRev!==null?invRev*365:null;
+ renderChartIfData('workingCapitalChart',{type:'bar',data:{labels:['AR/Revenue','Inventory/Revenue','DSO','DIO'],datasets:[{label:'Working Capital',data:[arRev,invRev,dso,dio],backgroundColor:['#a78bfa','#f43f5e','#14b8a6','#f59e0b']}]}},'workingCapitalChartEmpty');
+ renderChartIfData('ratioRiskChart',{type:'bar',data:{labels:['CFO/NI','Accrual Ratio','Debt/CFO','Interest Coverage','ETR','AR/Revenue','Inventory/Revenue'],datasets:[{label:'Latest Ratio Snapshot',data:[num(getRatio(rows,'CFO / Net Income')?.value),num(getRatio(rows,'Accrual Ratio')?.value),debtCfo,intCov,etr,arRev,invRev],backgroundColor:'#60a5fa'}]}},'ratioRiskChartEmpty');
  const si=d.sec_filing_intelligence||{};
- safeSet('secIntel',`<h3>SEC Filing Intelligence</h3><div>10-K: ${si.latest_10k?.url?`<a target='_blank' href='${si.latest_10k.url}'>${si.latest_10k.date}</a>`:'Unavailable'}</div><div>10-Q: ${si.latest_10q?.url?`<a target='_blank' href='${si.latest_10q.url}'>${si.latest_10q.date}</a>`:'Unavailable'}</div><div>${si.summary||''}</div><ul>${(si.findings||[]).map(f=>`<li><b>${f.severity}</b> ${f.area}: ${f.finding} — ${f.why_it_matters} <i>${f.source}</i></li>`).join('')}</ul>${(si.raw_evidence||[]).map(e=>`<details><summary>Raw evidence</summary><div>${e}</div></details>`).join('')}`);
+ safeSet('secIntel',`<h3>SEC Filing Intelligence</h3><div class='bar'>What this section measures: recency and availability of primary SEC filings to validate accounting narrative. How to interpret: recent 10-K/10-Q links improve confidence and speed of review. Why it matters: forensic conclusions should be cross-checked against filing disclosures.</div><div>10-K: ${si.latest_10k?.url?`<a target='_blank' href='${si.latest_10k.url}'>${si.latest_10k.date}</a>`:'Unavailable'}</div><div>10-Q: ${si.latest_10q?.url?`<a target='_blank' href='${si.latest_10q.url}'>${si.latest_10q.date}</a>`:'Unavailable'}</div><div>${si.summary||''}</div><ul>${(si.findings||[]).map(f=>`<li><b>${f.severity}</b> ${f.area}: ${f.finding} — ${f.why_it_matters} <i>${f.source}</i></li>`).join('')}</ul>${(si.raw_evidence||[]).map(e=>`<details><summary>Raw evidence</summary><div>${e}</div></details>`).join('')}`);
  const grouped=(d.manual_review_checklist||[]).reduce((a,x)=>{(a[x.area]=a[x.area]||[]).push(x.item);return a},{});
  safeSet('manualChecklist',`<h3>Manual Review Checklist</h3>${Object.entries(grouped).map(([k,v])=>`<div><b>${k}</b><ul>${v.map(i=>`<li>${i}</li>`).join('')}</ul></div>`).join('')}`);
  safeSet('screener',`<h3>Screener</h3><table><tr><th>Ticker</th><th>Forensic View</th><th>Risk</th></tr><tr><td>${d.ticker}</td><td>${v.forensic_view||'INCONCLUSIVE'}</td><td>${v.risk_level||'Unknown'}</td></tr></table>`);
